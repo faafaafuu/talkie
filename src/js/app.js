@@ -253,7 +253,11 @@ function renderSettings() {
   // А раскрытый список не перестраиваем вовсе: он закрылся бы на глазах.
   if (busy?.tagName === 'SELECT' && $('page-settings').contains(busy)) return;
 
-  fill($('set-hotkey'), state.hotkeys.map((key) => [key.id, key.title]), config.hotkey);
+  // Своё сочетание — отдельной строкой списка: к готовому можно вернуться,
+  // не теряя из виду, что было назначено.
+  const hotkeys = state.hotkeys.map((key) => [key.id, key.title]);
+  if (config.hotkey.startsWith('keys:')) hotkeys.push([config.hotkey, `Своя: ${state.hotkeyTitle}`]);
+  fill($('set-hotkey'), hotkeys, config.hotkey);
   fill($('set-language'), LANGUAGES, config.language);
   fill($('set-microphone'), [['', 'Основной в системе'], ...state.devices.map((name) => [name, name])], config.microphone);
   fill($('set-model'), [
@@ -343,6 +347,46 @@ $('page-settings').addEventListener('change', async (event) => {
   queueSave();
 });
 
+/* Своя клавиша: программа ждёт нажатия и сама сообщает, что нажали. */
+
+const HOTKEY_NOTE = 'Удержание — запись, двойное нажатие — без рук';
+let capturing = false;
+
+function showCapture(on, note = HOTKEY_NOTE, bad = false) {
+  capturing = on;
+  const button = $('hotkey-capture');
+  button.classList.toggle('on', on);
+  button.textContent = on ? 'Отмена' : 'Своя…';
+  $('hotkey-note').textContent = note;
+  $('hotkey-note').classList.toggle('bad', bad);
+}
+
+$('hotkey-capture').addEventListener('click', async (event) => {
+  // Иначе щелчок дошёл бы до обработчика настроек как изменение.
+  event.stopPropagation();
+  if (capturing) {
+    await invoke('cancel_capture');
+    return;
+  }
+  showCapture(true, 'Нажмите клавишу или сочетание и отпустите. Esc — отмена');
+  await invoke('capture_hotkey');
+});
+
+listen('hotkey:captured', async ({ payload }) => {
+  if (payload.error) {
+    showCapture(false, payload.error, true);
+    return;
+  }
+  showCapture(false);
+  if (payload.cancelled) return;
+  state.config.hotkey = payload.id;
+  state.hotkeyTitle = payload.title;
+  // Список перестраивается сразу: в нём ещё нет строки с новым сочетанием.
+  $('set-hotkey').blur();
+  renderSettings();
+  await save();
+});
+
 $('unload').addEventListener('click', async () => {
   await invoke('unload_model');
   setTimeout(refresh, 600);
@@ -430,6 +474,8 @@ function demo() {
       totals: { dictations: 128, words: 4210, seconds: 1890 },
     }),
     save_config: ({ config: next }) => { Object.assign(config, next); },
+    capture_hotkey: () => null,
+    cancel_capture: () => null,
     ollama_models: () => ['qwen2.5:7b'],
   };
   return {

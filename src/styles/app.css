@@ -190,6 +190,11 @@ button:disabled { opacity: 0.55; cursor: default; }
 .row small { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; }
 .row select, .row input[type="text"], .row input[type="password"], .row .combo { width: 280px; flex: none; }
 .row .combo input { width: 100%; }
+.row .pick { display: flex; gap: 8px; width: 280px; flex: none; }
+.row .pick select { width: auto; flex: 1; min-width: 0; }
+.row .pick button { flex: none; }
+.row .pick button.on { border-color: var(--accent); color: var(--accent); }
+.row small.bad { color: var(--danger); }
 .row.tall { align-items: flex-start; }
 .row.tall textarea { width: 280px; flex: none; }
 input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); flex: none; }

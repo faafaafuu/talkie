@@ -7,8 +7,13 @@
 //! Хук стоит на всей системе, и Windows снимает те, что думают дольше
 //! положенного. Поэтому внутри только атомарные флаги и отправка в канал, а
 //! решения — долгое это нажатие или двойное — принимает другой поток.
+//!
+//! Клавиша — это до трёх «слотов», в каждом до двух кодов (левый или правый
+//! Ctrl — любой). Она нажата, когда нажаты все слоты. В настройках хранится
+//! либо имя готового варианта (`rctrl`), либо своё сочетание: `keys:` и коды
+//! слотов через `+`, внутри слота через `|` — например `keys:162|163+68`.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::OnceLock;
 
@@ -28,41 +33,235 @@ pub enum Event {
     Chord,
     /// Esc во время записи — отменить.
     Cancel,
+    /// Человек назначал свою клавишу и нажал её — забрать через `take_capture`.
+    Captured,
+    /// Назначение отменено: Esc или вышло время.
+    CaptureCancelled,
 }
 
-/// Выбор клавиши в настройках: имя, подпись и из чего она состоит.
-///
-/// Каждый слот — до двух кодов, годится любой (левый или правый Ctrl). Клавиша
-/// считается нажатой, когда нажаты все слоты. `swallow` — забирать ли нажатие
-/// у системы: F9 и CapsLock иначе сработают и в программе под курсором, а
-/// модификаторы забирать нельзя — без них перестанут работать сочетания.
+type Slots = [[u32; 2]; 3];
+
+/// Готовый вариант клавиши в настройках.
 pub struct Preset {
     pub id: &'static str,
     pub title: &'static str,
-    slots: [[u32; 2]; 2],
-    swallow: bool,
+    slots: Slots,
 }
+
+const NONE: [u32; 2] = [0, 0];
 
 pub const PRESETS: &[Preset] = &[
-    Preset { id: "rctrl", title: "Правый Ctrl", slots: [[0xA3, 0], [0, 0]], swallow: false },
-    Preset { id: "ralt", title: "Правый Alt", slots: [[0xA5, 0], [0, 0]], swallow: false },
-    Preset { id: "ctrl+win", title: "Ctrl + Win", slots: [[0xA2, 0xA3], [0x5B, 0x5C]], swallow: false },
-    Preset { id: "capslock", title: "Caps Lock", slots: [[0x14, 0], [0, 0]], swallow: true },
-    Preset { id: "f8", title: "F8", slots: [[0x77, 0], [0, 0]], swallow: true },
-    Preset { id: "f9", title: "F9", slots: [[0x78, 0], [0, 0]], swallow: true },
-    Preset { id: "pause", title: "Pause", slots: [[0x13, 0], [0, 0]], swallow: true },
+    Preset { id: "rctrl", title: "Правый Ctrl", slots: [[0xA3, 0], NONE, NONE] },
+    Preset { id: "ralt", title: "Правый Alt", slots: [[0xA5, 0], NONE, NONE] },
+    Preset { id: "ctrl+win", title: "Ctrl + Win", slots: [[0xA2, 0xA3], [0x5B, 0x5C], NONE] },
+    Preset { id: "capslock", title: "Caps Lock", slots: [[0x14, 0], NONE, NONE] },
+    Preset { id: "f8", title: "F8", slots: [[0x77, 0], NONE, NONE] },
+    Preset { id: "f9", title: "F9", slots: [[0x78, 0], NONE, NONE] },
+    Preset { id: "pause", title: "Pause", slots: [[0x13, 0], NONE, NONE] },
 ];
 
-pub fn title(id: &str) -> &'static str {
-    PRESETS.iter().find(|p| p.id == id).map(|p| p.title).unwrap_or(PRESETS[0].title)
+/// Приставка своего сочетания в настройках.
+const CUSTOM: &str = "keys:";
+
+fn is_modifier(vk: u32) -> bool {
+    matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5)
 }
 
-static SLOT_A: [AtomicU32; 2] = [AtomicU32::new(0xA3), AtomicU32::new(0)];
-static SLOT_B: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
-static SWALLOW: AtomicBool = AtomicBool::new(false);
+/// Alt и Win, отпущенные без другой клавиши, открывают меню окна и «Пуск».
+fn opens_menu(vk: u32) -> bool {
+    matches!(vk, 0x12 | 0x5B | 0x5C | 0xA4 | 0xA5)
+}
 
-static A_DOWN: AtomicBool = AtomicBool::new(false);
-static B_DOWN: AtomicBool = AtomicBool::new(false);
+/// Разбирает запись из настроек в слоты. Непонятное — первый готовый вариант:
+/// программа с неработающей клавишей хуже программы с клавишей по умолчанию.
+fn slots_of(id: &str) -> Slots {
+    if let Some(preset) = PRESETS.iter().find(|p| p.id == id) {
+        return preset.slots;
+    }
+    parse_custom(id).unwrap_or(PRESETS[0].slots)
+}
+
+fn parse_custom(id: &str) -> Option<Slots> {
+    let mut slots: Slots = [NONE; 3];
+    let parts: Vec<&str> = id.strip_prefix(CUSTOM)?.split('+').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    for (slot, part) in slots.iter_mut().zip(&parts) {
+        let codes: Vec<u32> = part.split('|').filter_map(|code| code.parse().ok()).collect();
+        if codes.is_empty() || codes.len() > 2 || codes.iter().any(|code| *code == 0 || *code > 0xFF) {
+            return None;
+        }
+        slot[..codes.len()].copy_from_slice(&codes);
+    }
+    Some(slots)
+}
+
+/// Как клавиша называется для человека.
+fn key_name(vk: u32) -> String {
+    let fixed = match vk {
+        0x08 => "Backspace",
+        0x09 => "Tab",
+        0x0D => "Enter",
+        0x13 => "Pause",
+        0x14 => "Caps Lock",
+        0x20 => "Пробел",
+        0x21 => "Page Up",
+        0x22 => "Page Down",
+        0x23 => "End",
+        0x24 => "Home",
+        0x25 => "←",
+        0x26 => "↑",
+        0x27 => "→",
+        0x28 => "↓",
+        0x2C => "Print Screen",
+        0x2D => "Insert",
+        0x2E => "Delete",
+        0x5B => "Левый Win",
+        0x5C => "Правый Win",
+        0x6A => "Num *",
+        0x6B => "Num +",
+        0x6D => "Num −",
+        0x6E => "Num .",
+        0x6F => "Num /",
+        0x90 => "Num Lock",
+        0x91 => "Scroll Lock",
+        0xA0 => "Левый Shift",
+        0xA1 => "Правый Shift",
+        0xA2 => "Левый Ctrl",
+        0xA3 => "Правый Ctrl",
+        0xA4 => "Левый Alt",
+        0xA5 => "Правый Alt",
+        0xBA => ";",
+        0xBB => "=",
+        0xBC => ",",
+        0xBD => "-",
+        0xBE => ".",
+        0xBF => "/",
+        0xC0 => "`",
+        0xDB => "[",
+        0xDC => "\\",
+        0xDD => "]",
+        0xDE => "'",
+        _ => "",
+    };
+    if !fixed.is_empty() {
+        return fixed.to_string();
+    }
+    match vk {
+        0x30..=0x39 | 0x41..=0x5A => char::from(vk as u8).to_string(),
+        0x60..=0x69 => format!("Num {}", vk - 0x60),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
+        _ => format!("клавиша {vk}"),
+    }
+}
+
+fn slot_name(slot: [u32; 2]) -> String {
+    match slot {
+        [0xA2, 0xA3] => "Ctrl".into(),
+        [0xA4, 0xA5] => "Alt".into(),
+        [0xA0, 0xA1] => "Shift".into(),
+        [0x5B, 0x5C] => "Win".into(),
+        [code, _] => key_name(code),
+    }
+}
+
+pub fn title(id: &str) -> String {
+    if let Some(preset) = PRESETS.iter().find(|p| p.id == id) {
+        return preset.title.to_string();
+    }
+    match parse_custom(id) {
+        Some(slots) => slots
+            .iter()
+            .filter(|slot| slot[0] != 0)
+            .map(|slot| slot_name(*slot))
+            .collect::<Vec<_>>()
+            .join(" + "),
+        None => PRESETS[0].title.to_string(),
+    }
+}
+
+/// Собирает своё сочетание из нажатых клавиш — или объясняет, чем оно плохо.
+///
+/// Обычная клавиша без модификатора не годится: она нужна для набора текста,
+/// а диктовка забрала бы её себе во всех программах. То же с Shift и буквой —
+/// это заглавная буква.
+pub fn compose(pressed: &[u32]) -> Result<String, String> {
+    let mut modifiers: Vec<u32> = pressed.iter().copied().filter(|vk| is_modifier(*vk)).collect();
+    let plain: Vec<u32> = pressed.iter().copied().filter(|vk| !is_modifier(*vk)).collect();
+    if pressed.is_empty() {
+        return Err("Клавиша не нажата".into());
+    }
+    if plain.len() > 1 {
+        return Err("В сочетании может быть только одна обычная клавиша — остальные Ctrl, Alt, Shift или Win".into());
+    }
+
+    // Порядок привычный для глаза: Ctrl, Alt, Shift, Win.
+    let rank = |vk: &u32| match *vk {
+        0xA2 | 0xA3 => 0,
+        0xA4 | 0xA5 => 1,
+        0xA0 | 0xA1 => 2,
+        _ => 3,
+    };
+    modifiers.sort_by_key(rank);
+    modifiers.dedup_by_key(|vk| rank(&*vk));
+
+    // Свободна ли клавиша от набора текста сама по себе: функциональные,
+    // Pause, Caps Lock, Scroll Lock, Insert.
+    let standalone = |vk: u32| matches!(vk, 0x13 | 0x14 | 0x2D | 0x91 | 0x70..=0x87);
+
+    if let Some(&key) = plain.first() {
+        if key == 0x1B {
+            return Err("Esc занят: им отменяют запись".into());
+        }
+        if modifiers.is_empty() && !standalone(key) {
+            return Err(format!(
+                "«{}» нужна для набора текста — добавьте к ней Ctrl, Alt или Win",
+                key_name(key)
+            ));
+        }
+        let only_shift = modifiers.iter().all(|vk| matches!(vk, 0xA0 | 0xA1));
+        if !modifiers.is_empty() && only_shift && !standalone(key) {
+            return Err("Shift с клавишей — это заглавная буква; добавьте Ctrl, Alt или Win".into());
+        }
+    }
+
+    // Одинокий модификатор запоминается с той стороны, с какой нажат: правый
+    // Ctrl свободен, а левый нужен для сочетаний. В сочетании сторона не
+    // важна — годится любая.
+    let single = modifiers.len() == 1 && plain.is_empty();
+    let mut parts: Vec<String> = modifiers
+        .iter()
+        .map(|vk| {
+            if single {
+                return vk.to_string();
+            }
+            match *vk {
+                0xA2 | 0xA3 => "162|163".into(),
+                0xA4 | 0xA5 => "164|165".into(),
+                0xA0 | 0xA1 => "160|161".into(),
+                _ => "91|92".into(),
+            }
+        })
+        .collect();
+    parts.extend(plain.iter().map(u32::to_string));
+    Ok(format!("{CUSTOM}{}", parts.join("+")))
+}
+
+const fn empty_slot() -> [AtomicU32; 2] {
+    [AtomicU32::new(0), AtomicU32::new(0)]
+}
+
+static KEYS: [[AtomicU32; 2]; 3] = [[AtomicU32::new(0xA3), AtomicU32::new(0)], empty_slot(), empty_slot()];
+static DOWN: [AtomicBool; 3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
+/// Сочетание из одних модификаторов: их у системы не забираем, зато другая
+/// клавиша поверх означает «это было сочетание, а не диктовка».
+static MODS_ONLY: AtomicBool = AtomicBool::new(true);
+/// В сочетании есть Alt или Win — после нажатия посылаем пустую клавишу.
+static NEED_MASK: AtomicBool = AtomicBool::new(false);
+/// Нажатие обычной клавиши сочетания забрали — заберём и отпускание.
+static EATEN: AtomicBool = AtomicBool::new(false);
+
 /// Клавиша диктовки сейчас нажата целиком.
 static HELD: AtomicBool = AtomicBool::new(false);
 /// Идёт запись — Esc её отменяет.
@@ -73,18 +272,32 @@ static LOCKED: AtomicBool = AtomicBool::new(false);
 /// Выключено — хук пропускает всё насквозь (пауза из трея).
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
+/// Идёт назначение своей клавиши: всё нажатое собирается, а не исполняется.
+static CAPTURING: AtomicBool = AtomicBool::new(false);
+static CAPTURED: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+/// Номер назначения — чтобы таймер старого не оборвал новое.
+static CAPTURE_RUN: AtomicU64 = AtomicU64::new(0);
+
+/// Сколько ждать нажатия при назначении. Пока идёт назначение, клавиатура
+/// у всей системы отнята, и навсегда так оставаться не должно.
+const CAPTURE_SECONDS: u64 = 8;
+
 static EVENTS: OnceLock<Sender<Event>> = OnceLock::new();
 
 /// Применяет выбор клавиши из настроек.
 pub fn configure(id: &str) {
-    let preset = PRESETS.iter().find(|p| p.id == id).unwrap_or(&PRESETS[0]);
-    for i in 0..2 {
-        SLOT_A[i].store(preset.slots[0][i], Ordering::Relaxed);
-        SLOT_B[i].store(preset.slots[1][i], Ordering::Relaxed);
+    let slots = slots_of(id);
+    for (slot, codes) in KEYS.iter().zip(slots) {
+        slot[0].store(codes[0], Ordering::Relaxed);
+        slot[1].store(codes[1], Ordering::Relaxed);
     }
-    SWALLOW.store(preset.swallow, Ordering::Relaxed);
-    A_DOWN.store(false, Ordering::Relaxed);
-    B_DOWN.store(false, Ordering::Relaxed);
+    let all = slots.iter().flatten().copied().filter(|vk| *vk != 0);
+    MODS_ONLY.store(all.clone().all(is_modifier), Ordering::Relaxed);
+    NEED_MASK.store(all.clone().any(opens_menu), Ordering::Relaxed);
+    for flag in &DOWN {
+        flag.store(false, Ordering::Relaxed);
+    }
+    EATEN.store(false, Ordering::Relaxed);
     HELD.store(false, Ordering::Relaxed);
 }
 
@@ -99,6 +312,37 @@ pub fn set_enabled(on: bool) {
 
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
+}
+
+/// Начинает назначение своей клавиши: следующее нажатие станет ею.
+pub fn start_capture() {
+    for key in &CAPTURED {
+        key.store(0, Ordering::Relaxed);
+    }
+    let run = CAPTURE_RUN.fetch_add(1, Ordering::SeqCst) + 1;
+    CAPTURING.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(CAPTURE_SECONDS));
+        if CAPTURE_RUN.load(Ordering::SeqCst) == run && CAPTURING.swap(false, Ordering::SeqCst) {
+            send(Event::CaptureCancelled);
+        }
+    });
+}
+
+pub fn cancel_capture() {
+    if CAPTURING.swap(false, Ordering::SeqCst) {
+        send(Event::CaptureCancelled);
+    }
+}
+
+/// Что нажали при назначении: запись для настроек или причина отказа.
+pub fn take_capture() -> Result<String, String> {
+    let pressed: Vec<u32> = CAPTURED
+        .iter()
+        .map(|key| key.load(Ordering::Relaxed))
+        .filter(|vk| *vk != 0)
+        .collect();
+    compose(&pressed)
 }
 
 fn send(event: Event) {
@@ -149,11 +393,46 @@ fn hook_loop() {
     }
 }
 
-fn in_slot(slot: &[AtomicU32; 2], vk: u32) -> bool {
-    slot.iter().any(|code| {
-        let code = code.load(Ordering::Relaxed);
-        code != 0 && code == vk
+/// В каком слоте клавиши диктовки стоит этот код.
+fn slot_index(vk: u32) -> Option<usize> {
+    KEYS.iter().position(|slot| {
+        slot.iter().any(|code| {
+            let code = code.load(Ordering::Relaxed);
+            code != 0 && code == vk
+        })
     })
+}
+
+/// Нажаты ли все слоты, кроме названного (`usize::MAX` — все без исключения).
+fn slots_down(except: usize) -> bool {
+    KEYS.iter().enumerate().all(|(index, slot)| {
+        index == except || slot[0].load(Ordering::Relaxed) == 0 || DOWN[index].load(Ordering::Relaxed)
+    })
+}
+
+/// Назначение своей клавиши: собирает нажатое и ничего не пропускает дальше.
+fn capture(vk: u32, down: bool) {
+    if vk == 0x1B {
+        if down && CAPTURING.swap(false, Ordering::SeqCst) {
+            send(Event::CaptureCancelled);
+        }
+        return;
+    }
+    if down {
+        for key in &CAPTURED {
+            let stored = key.load(Ordering::Relaxed);
+            if stored == vk {
+                return;
+            }
+            if stored == 0 {
+                key.store(vk, Ordering::Relaxed);
+                return;
+            }
+        }
+    } else if CAPTURED[0].load(Ordering::Relaxed) != 0 && CAPTURING.swap(false, Ordering::SeqCst) {
+        // Первое же отпускание — сочетание набрано.
+        send(Event::Captured);
+    }
 }
 
 unsafe extern "system" fn keyboard_proc(
@@ -169,7 +448,7 @@ unsafe extern "system" fn keyboard_proc(
 
     let pass = || unsafe { CallNextHookEx(None, code, wparam, lparam) };
 
-    if code != HC_ACTION as i32 || !ENABLED.load(Ordering::Relaxed) {
+    if code != HC_ACTION as i32 {
         return pass();
     }
 
@@ -185,6 +464,17 @@ unsafe extern "system" fn keyboard_proc(
         return pass();
     }
 
+    if CAPTURING.load(Ordering::SeqCst) {
+        if down || up {
+            capture(vk, down);
+        }
+        return LRESULT(1);
+    }
+
+    if !ENABLED.load(Ordering::Relaxed) {
+        return pass();
+    }
+
     // Esc во время записи — отмена.
     if vk == 0x1B && RECORDING.load(Ordering::Relaxed) {
         if down {
@@ -196,49 +486,51 @@ unsafe extern "system" fn keyboard_proc(
         return pass();
     }
 
-    let in_a = in_slot(&SLOT_A, vk);
-    let in_b = in_slot(&SLOT_B, vk);
-    let two = SLOT_B[0].load(Ordering::Relaxed) != 0;
-
-    if !in_a && !in_b {
+    let Some(index) = slot_index(vk) else {
         // Другая клавиша поверх удерживаемой — это сочетание, а не диктовка.
         // Одиночные модификаторы в счёт не идут: Shift и Alt нажимают, меняя
         // раскладку, и обрывать из-за этого запись незачем.
-        let modifier = matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5 | 0xE8);
-        if down && !modifier && HELD.load(Ordering::Relaxed) && !SWALLOW.load(Ordering::Relaxed) {
+        if down
+            && !is_modifier(vk)
+            && vk != 0xE8
+            && HELD.load(Ordering::Relaxed)
+            && MODS_ONLY.load(Ordering::Relaxed)
+        {
             send(Event::Chord);
         }
         return pass();
-    }
+    };
 
-    let swallow = SWALLOW.load(Ordering::Relaxed);
-    let flag = if in_a { &A_DOWN } else { &B_DOWN };
+    // Обычную клавишу сочетания забираем у системы, но только когда остальное
+    // сочетание уже нажато: сама по себе буква остаётся буквой.
+    let plain = !is_modifier(vk);
 
     if down {
         // Windows шлёт нажатие снова и снова, пока клавишу держат.
-        let repeat = flag.swap(true, Ordering::Relaxed);
-        if !repeat {
-            let all = A_DOWN.load(Ordering::Relaxed) && (!two || B_DOWN.load(Ordering::Relaxed));
-            if all && !HELD.swap(true, Ordering::Relaxed) {
-                // Одинокий Alt, отпущенный без другой клавиши, открывает меню
-                // окна, Win — «Пуск». Пустая клавиша между нажатием и
-                // отпусканием снимает оба эффекта.
-                if two || vk == 0xA5 {
-                    mask_modifiers();
-                }
-                send(Event::Down);
+        let repeat = DOWN[index].swap(true, Ordering::Relaxed);
+        let rest = slots_down(index);
+        if !repeat && rest && !HELD.swap(true, Ordering::Relaxed) {
+            if NEED_MASK.load(Ordering::Relaxed) {
+                mask_modifiers();
             }
+            send(Event::Down);
+        }
+        // Забранная клавиша остаётся нашей до отпускания, даже если
+        // модификаторы отпустили раньше: иначе её повторы напечатались бы.
+        if plain && (rest || EATEN.load(Ordering::Relaxed)) {
+            EATEN.store(true, Ordering::Relaxed);
+            return LRESULT(1);
         }
     } else if up {
-        flag.store(false, Ordering::Relaxed);
+        DOWN[index].store(false, Ordering::Relaxed);
         if HELD.swap(false, Ordering::Relaxed) {
             send(Event::Up);
         }
+        if plain && EATEN.swap(false, Ordering::Relaxed) {
+            return LRESULT(1);
+        }
     }
 
-    if swallow {
-        return LRESULT(1);
-    }
     pass()
 }
 
@@ -257,7 +549,7 @@ unsafe extern "system" fn mouse_proc(
         WM_RBUTTONDOWN, WM_XBUTTONDOWN,
     };
 
-    if code >= 0 && HELD.load(Ordering::Relaxed) && !SWALLOW.load(Ordering::Relaxed) {
+    if code >= 0 && HELD.load(Ordering::Relaxed) && MODS_ONLY.load(Ordering::Relaxed) {
         let message = wparam.0 as u32;
         if matches!(
             message,
@@ -309,5 +601,51 @@ mod tests {
     #[test]
     fn unknown_name_falls_back_to_the_first_preset() {
         assert_eq!(title("нет такой"), PRESETS[0].title);
+        assert_eq!(slots_of("keys:мусор"), PRESETS[0].slots);
+        assert_eq!(slots_of("keys:1+2+3+4"), PRESETS[0].slots);
+    }
+
+    #[test]
+    fn a_combination_is_composed_and_named() {
+        // Левый Ctrl, левый Shift и D — в любом порядке нажатия.
+        let id = compose(&[0x44, 0xA0, 0xA2]).unwrap();
+        assert_eq!(id, "keys:162|163+160|161+68");
+        assert_eq!(title(&id), "Ctrl + Shift + D");
+        assert_eq!(slots_of(&id), [[0xA2, 0xA3], [0xA0, 0xA1], [0x44, 0]]);
+    }
+
+    #[test]
+    fn a_lone_modifier_keeps_its_side() {
+        let id = compose(&[0xA1]).unwrap();
+        assert_eq!(id, "keys:161");
+        assert_eq!(title(&id), "Правый Shift");
+    }
+
+    #[test]
+    fn pressed_keys_are_collected_until_release() {
+        start_capture();
+        capture(0xA4, true);
+        capture(0x79, true);
+        capture(0x79, true); // повтор от удержания
+        assert!(CAPTURING.load(Ordering::SeqCst));
+        capture(0x79, false);
+        assert!(!CAPTURING.load(Ordering::SeqCst));
+        assert_eq!(title(&take_capture().unwrap()), "Alt + F10");
+    }
+    #[test]
+    fn function_keys_work_alone() {
+        assert_eq!(title(&compose(&[0x7B]).unwrap()), "F12");
+        assert_eq!(title(&compose(&[0xA4, 0x79]).unwrap()), "Alt + F10");
+    }
+
+    #[test]
+    fn typing_keys_are_refused() {
+        assert!(compose(&[0x44]).is_err(), "буква без модификатора");
+        assert!(compose(&[0xA0, 0x44]).is_err(), "Shift с буквой — заглавная");
+        assert!(compose(&[0xA2, 0x44, 0x46]).is_err(), "две обычные клавиши");
+        assert!(compose(&[0x1B]).is_err(), "Esc отменяет запись");
+        assert!(compose(&[]).is_err());
+        // А с Ctrl буква годится.
+        assert!(compose(&[0xA2, 0x44]).is_ok());
     }
 }

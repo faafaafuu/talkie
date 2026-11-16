@@ -200,6 +200,17 @@ fn controller(app: AppHandle, events: Receiver<hotkey::Event>) {
     let mut last_tap: Option<Instant> = None;
 
     for event in events {
+        // Назначение своей клавиши к записи отношения не имеет: итог — окну.
+        if matches!(event, Event::Captured | Event::CaptureCancelled) {
+            let payload = match (event, hotkey::take_capture()) {
+                (Event::Captured, Ok(id)) => serde_json::json!({ "id": id, "title": hotkey::title(&id) }),
+                (Event::Captured, Err(reason)) => serde_json::json!({ "error": reason }),
+                _ => serde_json::json!({ "cancelled": true }),
+            };
+            log::info!("назначение клавиши: {payload}");
+            let _ = app.emit_to(MAIN_LABEL, "hotkey:captured", payload);
+            continue;
+        }
         phase = match (event, phase) {
             (Event::Down, Phase::Idle) => {
                 if start_recording(&app) {
@@ -650,6 +661,18 @@ fn unload_model() {
     whisper::shutdown();
 }
 
+/// Начинает назначение своей клавиши; итог придёт событием `hotkey:captured`.
+#[tauri::command]
+fn capture_hotkey() {
+    log::info!("жду нажатия для назначения клавиши");
+    hotkey::start_capture();
+}
+
+#[tauri::command]
+fn cancel_capture() {
+    hotkey::cancel_capture();
+}
+
 /* ── Запуск ───────────────────────────────────────────────────────────────── */
 
 pub fn run() {
@@ -690,6 +713,8 @@ pub fn run() {
             copy_text,
             ollama_models,
             unload_model,
+            capture_hotkey,
+            cancel_capture,
         ])
         .on_window_event(|window, event| {
             // Крестик прячет окно, а не закрывает программу: она живёт в трее.
