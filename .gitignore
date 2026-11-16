@@ -1,0 +1,12 @@
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/gen/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# ОС и IDE
+.DS_Store
+Thumbs.db
+.idea/

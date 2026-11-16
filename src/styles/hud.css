@@ -1,0 +1,130 @@
+/* Индикатор записи: «пилюля» внизу экрана и текст «на лету» над ней. */
+
+* { box-sizing: border-box; margin: 0; }
+
+html, body {
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font: 13px/1.35 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  color: #f4f1fa;
+  user-select: none;
+  cursor: default;
+}
+
+.stage {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 10px 10px;
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+  transition: opacity 140ms ease, transform 180ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.stage:not([data-state="hidden"]) {
+  opacity: 1;
+  transform: none;
+}
+
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 20px;
+  background: rgba(21, 18, 30, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #ff7a59, #8a4fe0);
+  flex: none;
+}
+
+[data-state="listening"] .dot,
+[data-state="locked"] .dot {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% { transform: scale(1.5); opacity: 0.65; }
+}
+
+.bars {
+  display: none;
+  align-items: center;
+  gap: 3px;
+  height: 26px;
+}
+
+[data-state="listening"] .bars,
+[data-state="locked"] .bars {
+  display: flex;
+}
+
+.bars i {
+  width: 3px;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #ff8a6b, #a56bf0);
+  transition: height 70ms linear;
+}
+
+.label {
+  white-space: nowrap;
+  color: #d9d3e6;
+}
+
+.label:empty { display: none; }
+
+[data-state="transcribing"] .label::after,
+[data-state="polishing"] .label::after {
+  content: "";
+  display: inline-block;
+  width: 1.2em;
+  text-align: left;
+  animation: dots 1s steps(4) infinite;
+}
+
+@keyframes dots {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75% { content: "..."; }
+}
+
+[data-state="done"] .dot { background: #4cd08a; }
+[data-state="error"] .dot { background: #ff5d5d; }
+[data-state="cancelled"] .dot { background: #8d879c; }
+
+/* Текст «на лету»: последние слова, что уже расслышаны. */
+.partial {
+  max-width: 100%;
+  max-height: 58px;
+  padding: 7px 13px;
+  border-radius: 14px;
+  background: rgba(21, 18, 30, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #efeaf8;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  text-align: center;
+}
+
+.partial:empty { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .stage, .bars i { transition: none; }
+  .dot, .label::after { animation: none !important; }
+}

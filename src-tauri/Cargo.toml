@@ -1,0 +1,69 @@
+[package]
+name = "govor"
+version = "0.1.0"
+description = "Говор — диктовка голосом в любое окно. Распознавание идёт на вашем компьютере, бесплатно и без подписки."
+authors = ["Govor"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "govor_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = ["tray-icon"] }
+tauri-plugin-log = "2.9"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+tokio = { version = "1", features = ["time", "rt", "sync", "macros"] }
+
+# TLS системный (schannel): программа доверяет тем же сертификатам, что и
+# Windows, а сборке не нужен C-тулчейн.
+#   multipart — запись с микрофона уходит серверу расшифровки формой с файлом.
+#   socks, system-proxy — модель качается через тот же прокси, что и браузер.
+#   http2 — GitHub и Hugging Face отвечают по HTTP/2; без фичи клиент на таком
+#     соединении падает.
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "multipart",
+  "native-tls",
+  "socks",
+  "system-proxy",
+  "charset",
+  "http2",
+] }
+
+# cpal — запись с микрофона. zip — распаковать сборку whisper.cpp после загрузки.
+cpal = "0.16"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  # Шифрование ключа стороннего сервиса правки текста средствами системы.
+  "Win32_Security_Cryptography",
+  "Win32_System_Threading",
+  # Задания: сервер расшифровки уходит вместе с программой, как бы её ни закрыли.
+  "Win32_System_JobObjects",
+  # Буфер обмена: текст вставляется через него.
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  # Хук клавиатуры и посылка нажатий.
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  # PlaySoundW — сигналы начала и конца записи.
+  "Win32_Media_Audio",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true

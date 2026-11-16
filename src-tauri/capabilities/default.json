@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Права главного окна и индикатора записи. Окно без прав не получает ни событий, ни ответов на вызовы — молча, поэтому каждое новое окно надо перечислять здесь.",
+  "windows": ["main", "hud"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-hide"
+  ]
+}

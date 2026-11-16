@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Говор</title>
+  <link rel="stylesheet" href="styles/app.css">
+</head>
+<body>
+  <aside class="side">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      <span class="name">Говор</span>
+    </div>
+    <nav class="nav" id="nav">
+      <button data-page="home" class="on">Главная</button>
+      <button data-page="history">История</button>
+      <button data-page="dictionary">Словарь</button>
+      <button data-page="settings">Настройки</button>
+    </nav>
+    <div class="side-foot">
+      <div class="chip" id="engine-chip"></div>
+      <div class="version" id="version"></div>
+    </div>
+  </aside>
+
+  <main>
+    <!-- Главная -->
+    <section class="page on" id="page-home">
+      <header class="hero">
+        <h1>Удерживайте <kbd id="hero-key">Правый Ctrl</kbd> и говорите</h1>
+        <p>Отпустите — текст появится там, где стоит курсор: в письме, чате, документе, коде.
+          Два быстрых нажатия — запись без рук, до следующего нажатия. Esc — отменить.</p>
+      </header>
+
+      <div class="card warn" id="paused-card" hidden>
+        <strong>Пауза.</strong> Клавиша сейчас не слушается — снимите паузу в меню значка в трее.
+      </div>
+
+      <div class="card install" id="install-card" hidden>
+        <div>
+          <h2>Нужно один раз скачать распознавание</h2>
+          <p id="install-text"></p>
+        </div>
+        <div class="install-action">
+          <button class="primary" id="install-button">Скачать</button>
+          <div class="progress" id="install-progress" hidden>
+            <div class="track"><div class="fill" id="install-fill"></div></div>
+            <span id="install-status"></span>
+          </div>
+          <p class="error" id="install-error" hidden></p>
+        </div>
+      </div>
+
+      <div class="tiles">
+        <div class="tile"><b id="stat-words">0</b><span>слов надиктовано</span></div>
+        <div class="tile"><b id="stat-speed">—</b><span>слов в минуту</span></div>
+        <div class="tile"><b id="stat-saved">0 мин</b><span>сэкономлено на наборе</span></div>
+      </div>
+
+      <label class="try">
+        <span>Попробуйте здесь: поставьте курсор в поле и удерживайте клавишу</span>
+        <textarea id="try" rows="4" placeholder="Текст появится здесь…"></textarea>
+      </label>
+
+      <div class="recent" id="recent-block" hidden>
+        <h2>Недавнее</h2>
+        <ul class="items" id="recent"></ul>
+      </div>
+    </section>
+
+    <!-- История -->
+    <section class="page" id="page-history">
+      <header class="head">
+        <h1>История</h1>
+        <div class="head-tools">
+          <input type="search" id="history-search" placeholder="Поиск по тексту">
+          <button id="history-clear">Очистить</button>
+        </div>
+      </header>
+      <p class="hint">Хранится только на этом компьютере. Отключить можно в настройках.</p>
+      <ul class="items" id="history"></ul>
+      <p class="empty" id="history-empty" hidden>Здесь появится то, что вы надиктуете.</p>
+    </section>
+
+    <!-- Словарь -->
+    <section class="page" id="page-dictionary">
+      <header class="head">
+        <h1>Словарь</h1>
+        <button class="primary" id="dictionary-add">Добавить</button>
+      </header>
+      <p class="hint">Имена, термины и названия, которые распознавание пишет неверно.
+        Только левое поле — слово, которое надо расслышать именно так. Оба поля — замена:
+        сказали левое, в тексте окажется правое.</p>
+      <div class="dict" id="dictionary"></div>
+      <p class="empty" id="dictionary-empty" hidden>Словарь пуст. Добавьте слово, которое программа пишет не так.</p>
+    </section>
+
+    <!-- Настройки -->
+    <section class="page" id="page-settings">
+      <header class="head"><h1>Настройки</h1><span class="saved" id="saved" hidden>Сохранено</span></header>
+
+      <div class="group">
+        <h2>Диктовка</h2>
+        <label class="row"><span>Клавиша<small>Удержание — запись, двойное нажатие — без рук</small></span>
+          <select id="set-hotkey"></select></label>
+        <label class="row"><span>Язык речи<small>«Авто» определяет язык каждой фразы сам</small></span>
+          <select id="set-language"></select></label>
+        <label class="row"><span>Микрофон</span><select id="set-microphone"></select></label>
+        <label class="row"><span>Сигналы начала и конца записи</span><input type="checkbox" id="set-sounds"></label>
+        <label class="row"><span>Текст «на лету»<small>Показывать расслышанное, пока вы говорите. Только с видеокартой</small></span>
+          <input type="checkbox" id="set-livePreview"></label>
+      </div>
+
+      <div class="group">
+        <h2>Распознавание</h2>
+        <label class="row"><span>Модель<small id="model-note"></small></span><select id="set-model"></select></label>
+        <label class="row"><span>Выгружать модель из памяти<small>После простоя; следующая диктовка загрузит её снова за пару секунд</small></span>
+          <select id="set-unloadMinutes">
+            <option value="1">через минуту</option>
+            <option value="5">через 5 минут</option>
+            <option value="15">через 15 минут</option>
+            <option value="60">через час</option>
+            <option value="0">не выгружать</option>
+          </select></label>
+        <div class="row"><span>Сейчас модель <b id="loaded-text">не загружена</b></span>
+          <button id="unload">Выгрузить</button></div>
+      </div>
+
+      <div class="group">
+        <h2>Вставка текста</h2>
+        <label class="row"><span>Способ<small>Набор по буквам — для программ, которые не принимают вставку</small></span>
+          <select id="set-insert">
+            <option value="paste">через буфер обмена</option>
+            <option value="type">набором по буквам</option>
+          </select></label>
+        <label class="row"><span>Пробел после вставленного</span><input type="checkbox" id="set-trailingSpace"></label>
+        <label class="row"><span>Команды голосом<small>«Новая строка», «новый абзац»</small></span>
+          <input type="checkbox" id="set-voiceCommands"></label>
+      </div>
+
+      <div class="group">
+        <h2>Правка текста нейросетью</h2>
+        <p class="hint">Убирает слова-паразиты и оговорки, расставляет абзацы и списки, подбирает тон под
+          программу. Необязательно: без неё текст вставляется так, как расслышан.</p>
+        <label class="row"><span>Кто правит</span>
+          <select id="set-polish-mode">
+            <option value="off">никто — только распознавание</option>
+            <option value="ollama">Ollama на этом компьютере</option>
+            <option value="openai">сервис с интерфейсом OpenAI</option>
+          </select></label>
+        <div id="polish-fields" hidden>
+          <label class="row"><span>Адрес</span><input type="text" id="set-polish-url" spellcheck="false"></label>
+          <label class="row" id="polish-key-row"><span>Ключ<small>Хранится зашифрованным на этом компьютере</small></span>
+            <input type="password" id="set-polish-key" autocomplete="off"></label>
+          <label class="row"><span>Модель<small id="polish-note"></small></span>
+            <span class="combo"><input type="text" id="set-polish-model" list="polish-models" spellcheck="false">
+              <datalist id="polish-models"></datalist></span></label>
+          <label class="row tall"><span>Пожелания к тексту<small>Например: «обращение на ты», «без буквы ё»</small></span>
+            <textarea id="set-polish-instructions" rows="2"></textarea></label>
+        </div>
+      </div>
+
+      <div class="group">
+        <h2>Программа</h2>
+        <label class="row"><span>Запускать вместе с Windows</span><input type="checkbox" id="set-autostart"></label>
+        <label class="row"><span>Хранить историю диктовок</span><input type="checkbox" id="set-keepHistory"></label>
+      </div>
+    </section>
+  </main>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
