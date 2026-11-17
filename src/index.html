@@ -107,9 +107,13 @@
             <button id="hotkey-capture">Своя…</button></span></div>
         <label class="row"><span>Язык речи<small>«Авто» определяет язык каждой фразы сам</small></span>
           <select id="set-language"></select></label>
-        <label class="row"><span>Микрофон</span><select id="set-microphone"></select></label>
+        <div class="row"><span>Микрофон<small id="mic-note">Проверка: пять секунд записи и что из неё расслышано</small></span>
+          <span class="pick"><select id="set-microphone" aria-label="Микрофон"></select>
+            <button id="mic-test">Проверить</button></span></div>
         <label class="row"><span>Сигналы начала и конца записи</span><input type="checkbox" id="set-sounds"></label>
-        <label class="row"><span>Текст «на лету»<small>Показывать расслышанное, пока вы говорите. Только с видеокартой</small></span>
+        <label class="row"><span>Печатать по ходу речи<small>Текст появляется в окне, пока вы говорите. С видеокартой и без правки нейросетью</small></span>
+          <input type="checkbox" id="set-stream"></label>
+        <label class="row"><span>Текст «на лету» в индикаторе<small>Когда печать по ходу речи выключена</small></span>
           <input type="checkbox" id="set-livePreview"></label>
       </div>
 

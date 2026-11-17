@@ -14,9 +14,9 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN,
-    VK_RWIN, VK_SHIFT,
+    MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_BACK,
+    VK_CONTROL, VK_RETURN, VK_SHIFT,
 };
 
 use crate::hotkey::OWN_INPUT;
@@ -76,7 +76,6 @@ pub fn insert(text: &str, by_typing: bool) {
     if text.is_empty() {
         return;
     }
-    wait_for_modifiers();
 
     // SAFETY: работа с буфером обмена и посылка нажатий; буфер открывается и
     // закрывается внутри каждой функции.
@@ -109,25 +108,40 @@ pub fn insert(text: &str, by_typing: bool) {
     }
 }
 
+/// Набирает текст по буквам в окно, которое сейчас впереди.
+pub fn type_now(text: &str) {
+    // SAFETY: только посылка нажатий.
+    unsafe { type_text(text) }
+}
+
+/// Стирает `erase` знаков перед курсором и набирает на их месте `text` —
+/// так исправляется напечатанное по ходу речи, когда окончательная
+/// расшифровка разошлась с черновой.
+pub fn replace_tail(erase: usize, text: &str) {
+    // SAFETY: только посылка нажатий.
+    unsafe {
+        let none = KEYBD_EVENT_FLAGS(0);
+        let mut batch: Vec<INPUT> = Vec::new();
+        for _ in 0..erase {
+            batch.push(key(VK_BACK, 0, none));
+            batch.push(key(VK_BACK, 0, KEYEVENTF_KEYUP));
+            if batch.len() >= 40 {
+                send(&batch);
+                batch.clear();
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        }
+        if !batch.is_empty() {
+            send(&batch);
+        }
+        type_text(text);
+    }
+}
+
 /// Кладёт текст в буфер обмена — кнопка «копировать» в истории.
 pub fn copy(text: &str) -> bool {
     // SAFETY: см. `write_clipboard`.
     unsafe { write_clipboard(text) }
-}
-
-/// Ждёт, пока человек отпустит модификаторы.
-///
-/// Клавиша диктовки — сама модификатор, а запись без рук заканчивают, нажав её
-/// ещё раз. Ctrl+V, посланный поверх зажатого Win или Alt, стал бы другим
-/// сочетанием.
-fn wait_for_modifiers() {
-    let held = |vk: u16| unsafe { (GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000) != 0 };
-    for _ in 0..60 {
-        if ![VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN].iter().any(|vk| held(vk.0)) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
 }
 
 fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
@@ -139,8 +153,43 @@ fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
+/// Нажатие или отпускание модификатора так, как его послала бы клавиатура:
+/// со скан-кодом и признаком правой стороны.
+fn modifier(vk: u32, up: bool) -> INPUT {
+    let mut flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+    if matches!(vk, 0xA3 | 0xA5 | 0x5B | 0x5C) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    // SAFETY: только переводит код клавиши в скан-код.
+    let scan = unsafe { MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) } as u16;
+    key(VIRTUAL_KEY(vk as u16), scan, flags)
+}
+
+/// Посылает нажатия так, будто модификаторов на клавиатуре никто не держит.
+///
+/// Клавиша диктовки часто сама модификатор, и человек нажимает её снова, пока
+/// предыдущая фраза ещё вставляется. Буквы, набранные поверх зажатого Alt,
+/// программа принимает за сочетания Alt+буква — текст пропадал через раз.
+/// Поэтому зажатое на время набора отпускается и нажимается обратно — всё
+/// одним вызовом `SendInput`: система не вклинит между ними ни одного нажатия
+/// человека, и если он отпустит клавишу посреди набора, его отпускание придёт
+/// последним, и ничего не залипнет. Пустая клавиша 0xE8 после Alt и Win не даёт
+/// им открыть меню окна и «Пуск», когда человек их отпустит.
 unsafe fn send(inputs: &[INPUT]) {
-    SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
+    let all = around_held(inputs, &crate::hotkey::held_modifiers());
+    SendInput(&all, std::mem::size_of::<INPUT>() as i32);
+}
+
+fn around_held(inputs: &[INPUT], held: &[u32]) -> Vec<INPUT> {
+    let mut all = Vec::with_capacity(inputs.len() + held.len() * 2 + 2);
+    all.extend(held.iter().map(|vk| modifier(*vk, true)));
+    all.extend_from_slice(inputs);
+    all.extend(held.iter().map(|vk| modifier(*vk, false)));
+    if held.iter().any(|vk| matches!(vk, 0xA4 | 0xA5 | 0x5B | 0x5C)) {
+        all.push(key(VIRTUAL_KEY(0xE8), 0, KEYBD_EVENT_FLAGS(0)));
+        all.push(key(VIRTUAL_KEY(0xE8), 0, KEYEVENTF_KEYUP));
+    }
+    all
 }
 
 unsafe fn send_ctrl_v() {
@@ -192,7 +241,6 @@ unsafe fn type_text(text: &str) {
         send(&batch);
     }
 }
-
 /// Открывает буфер: он бывает занят другой программой — несколько попыток.
 unsafe fn open_clipboard() -> bool {
     for _ in 0..10 {
@@ -277,4 +325,43 @@ unsafe fn write_clipboard(text: &str) -> bool {
 
     let _ = CloseClipboard();
     placed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(inputs: &[INPUT]) -> Vec<(u16, bool)> {
+        inputs
+            .iter()
+            .map(|input| {
+                // SAFETY: все события здесь клавиатурные.
+                let ki = unsafe { input.Anonymous.ki };
+                (if ki.wVk.0 == 0 { ki.wScan } else { ki.wVk.0 }, (ki.dwFlags & KEYEVENTF_KEYUP).0 != 0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn held_alt_is_released_for_typing_and_pressed_back() {
+        let letter = [key(VIRTUAL_KEY(0), u16::from(b'a'), KEYEVENTF_UNICODE)];
+        let all = around_held(&letter, &[0xA4]);
+        assert_eq!(
+            summary(&all),
+            vec![(0xA4, true), (u16::from(b'a'), false), (0xA4, false), (0xE8, false), (0xE8, true)]
+        );
+    }
+
+    #[test]
+    fn nothing_is_added_when_no_modifier_is_held() {
+        let letter = [key(VIRTUAL_KEY(0), u16::from(b'a'), KEYEVENTF_UNICODE)];
+        assert_eq!(around_held(&letter, &[]).len(), 1);
+    }
+
+    #[test]
+    fn held_ctrl_needs_no_menu_mask() {
+        let letter = [key(VIRTUAL_KEY(0), u16::from(b'a'), KEYEVENTF_UNICODE)];
+        let all = around_held(&letter, &[0xA3]);
+        assert_eq!(summary(&all), vec![(0xA3, true), (u16::from(b'a'), false), (0xA3, false)]);
+    }
 }

@@ -242,7 +242,7 @@ $('dictionary-add').addEventListener('click', () => {
 
 const SIMPLE = [
   ['hotkey', 'value'], ['language', 'value'], ['microphone', 'value'], ['model', 'value'],
-  ['insert', 'value'], ['sounds', 'checked'], ['livePreview', 'checked'], ['trailingSpace', 'checked'],
+  ['insert', 'value'], ['sounds', 'checked'], ['stream', 'checked'], ['livePreview', 'checked'], ['trailingSpace', 'checked'],
   ['voiceCommands', 'checked'], ['autostart', 'checked'], ['keepHistory', 'checked'],
 ];
 
@@ -387,6 +387,32 @@ listen('hotkey:captured', async ({ payload }) => {
   await save();
 });
 
+/* Проверка микрофона: запись, расшифровка и громкость — без вставки куда-либо. */
+
+$('mic-test').addEventListener('click', async (event) => {
+  event.stopPropagation();
+  const button = $('mic-test');
+  const note = $('mic-note');
+  button.disabled = true;
+  note.classList.remove('bad');
+  note.textContent = 'Говорите пять секунд, например: «Шестнадцать шустрых шершней сидели в щели»';
+  setTimeout(() => { if (button.disabled) note.textContent = 'Расшифровываю…'; }, 5000);
+  try {
+    const { peak, text } = await invoke('test_microphone', { device: $('set-microphone').value });
+    const loud = Math.round(peak * 100);
+    const level = loud < 5 ? 'очень тихо' : loud < 20 ? 'тихо' : loud > 98 ? 'перегруз' : 'громкость в порядке';
+    note.textContent = text
+      ? `Громкость ${loud}% — ${level}. Расслышано: «${text}»`
+      : `Громкость ${loud}% — ${level}. Ничего не расслышано`;
+    note.classList.toggle('bad', !text || loud < 5 || loud > 98);
+  } catch (error) {
+    note.textContent = String(error);
+    note.classList.add('bad');
+  } finally {
+    button.disabled = false;
+  }
+});
+
 $('unload').addEventListener('click', async () => {
   await invoke('unload_model');
   setTimeout(refresh, 600);
@@ -447,7 +473,7 @@ refresh().then(() => {
 
 function demo() {
   const config = {
-    hotkey: 'rctrl', language: 'auto', microphone: '', model: 'auto', sounds: true, livePreview: true,
+    hotkey: 'rctrl', language: 'auto', microphone: '', model: 'auto', sounds: true, stream: true, livePreview: true,
     insert: 'paste', trailingSpace: true, voiceCommands: true, keepHistory: true, unloadMinutes: 5,
     autostart: false, onboarded: true,
     polish: { mode: 'off', url: 'http://127.0.0.1:11434', key: '', model: '', instructions: '' },
@@ -475,6 +501,7 @@ function demo() {
     }),
     save_config: ({ config: next }) => { Object.assign(config, next); },
     capture_hotkey: () => null,
+    test_microphone: async () => { await new Promise((r) => setTimeout(r, 1500)); return { peak: 0.42, text: 'Шестнадцать шустрых шершней сидели в щели.' }; },
     cancel_capture: () => null,
     ollama_models: () => ['qwen2.5:7b'],
   };

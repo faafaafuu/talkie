@@ -284,6 +284,46 @@ const CAPTURE_SECONDS: u64 = 8;
 
 static EVENTS: OnceLock<Sender<Event>> = OnceLock::new();
 
+/// Модификаторы по порядку битов в `PHYSICAL`.
+const MODIFIERS: [u32; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C];
+
+/// Какие модификаторы человек держит на клавиатуре — по событиям хука, без
+/// наших собственных нажатий. Нужно вставке текста: она отпускает их на время
+/// набора, иначе буквы ушли бы в окно сочетаниями Alt+буква.
+static PHYSICAL: AtomicU32 = AtomicU32::new(0);
+
+fn modifier_bit(vk: u32) -> Option<u32> {
+    MODIFIERS.iter().position(|code| *code == vk).map(|index| 1 << index)
+}
+
+/// Модификаторы, которые сейчас зажаты рукой.
+///
+/// Хук не видит клавиш на защищённом столе (Ctrl+Alt+Del, запрос UAC), и
+/// отпускание там теряется. Поэтому каждый отмеченный модификатор сверяется
+/// с состоянием системы: лишний «зажатый» Alt вставка потом нажала бы обратно,
+/// и он залип бы.
+pub fn held_modifiers() -> Vec<u32> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+    let bits = PHYSICAL.load(Ordering::Relaxed);
+    MODIFIERS
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| bits & (1 << index) != 0)
+        .map(|(_, vk)| *vk)
+        .filter(|vk| {
+            // SAFETY: только читает состояние клавиши.
+            let down = unsafe { (GetAsyncKeyState(*vk as i32) as u16 & 0x8000) != 0 };
+            if !down {
+                if let Some(bit) = modifier_bit(*vk) {
+                    PHYSICAL.fetch_and(!bit, Ordering::Relaxed);
+                }
+            }
+            down
+        })
+        .collect()
+}
+
 /// Применяет выбор клавиши из настроек.
 pub fn configure(id: &str) {
     let slots = slots_of(id);
@@ -462,6 +502,14 @@ unsafe extern "system" fn keyboard_proc(
     // переназначения клавиш) — разбираем: для человека это его клавиатура.
     if info.dwExtraInfo == OWN_INPUT {
         return pass();
+    }
+
+    if let Some(bit) = modifier_bit(vk) {
+        if down {
+            PHYSICAL.fetch_or(bit, Ordering::Relaxed);
+        } else if up {
+            PHYSICAL.fetch_and(!bit, Ordering::Relaxed);
+        }
     }
 
     if CAPTURING.load(Ordering::SeqCst) {

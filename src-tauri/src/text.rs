@@ -155,6 +155,30 @@ fn tidy(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// Начало расшифровки, которое уже не изменится, — его можно печатать, пока
+/// человек ещё говорит.
+///
+/// Черновая расшифровка растущей записи меняется: последнее слово бывает
+/// недосказанным, а модель, услышав продолжение, переписывает и соседние.
+/// Устоявшимся считается то, что совпало в двух черновиках подряд, кроме
+/// последнего слова каждого. Слова берутся вместе с пробелом или переносом
+/// после них — так напечатанное сразу готово к продолжению.
+pub fn stable_prefix(previous: &str, current: &str) -> String {
+    let before: Vec<&str> = previous.split_inclusive(char::is_whitespace).collect();
+    let now: Vec<&str> = current.split_inclusive(char::is_whitespace).collect();
+    let mut same = 0;
+    while same < before.len() && same < now.len() && before[same].trim_end() == now[same].trim_end() {
+        same += 1;
+    }
+    let same = same.min(before.len().saturating_sub(1)).min(now.len().saturating_sub(1));
+    now[..same].concat()
+}
+
+/// Сколько первых знаков у двух строк совпадает.
+pub fn common_prefix(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
 pub fn words(text: &str) -> usize {
     text.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).count()
 }
@@ -205,6 +229,24 @@ mod tests {
     fn hint_is_what_should_appear_in_text() {
         let dict = [entry("постгрес", "PostgreSQL"), entry("Tauri", ""), entry("", "")];
         assert_eq!(hint(&dict), "PostgreSQL, Tauri");
+    }
+
+    #[test]
+    fn only_words_both_drafts_agree_on_are_stable() {
+        assert_eq!(stable_prefix("", "Привет, как"), "");
+        assert_eq!(stable_prefix("Привет, как", "Привет, как дела"), "Привет, ");
+        assert_eq!(stable_prefix("Привет, как дела", "Привет, как дела у"), "Привет, как ");
+        // Модель переписала середину — устоявшимся остаётся то, что до неё.
+        assert_eq!(stable_prefix("Завтра в пять вечера", "Завтра в шесть вечера мы"), "Завтра в ");
+        // Перенос строки сохраняется.
+        assert_eq!(stable_prefix("Пункт.\nДругой пункт", "Пункт.\nДругой пункт и"), "Пункт.\nДругой ");
+    }
+
+    #[test]
+    fn common_prefix_counts_letters_not_bytes() {
+        assert_eq!(common_prefix("Привет, как ", "Привет. Как дела "), 6);
+        assert_eq!(common_prefix("abc", "abc"), 3);
+        assert_eq!(common_prefix("", "abc"), 0);
     }
 
     #[test]

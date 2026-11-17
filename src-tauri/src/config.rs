@@ -51,7 +51,12 @@ pub struct Config {
     /// Модель распознавания: `auto` или имя из `whisper::MODELS`.
     pub model: String,
     pub sounds: bool,
-    /// Показывать ли текст в индикаторе, пока человек ещё говорит.
+    /// Печатать текст в окно, пока человек ещё говорит. Только с видеокартой
+    /// и без правки нейросетью: правка меняет текст целиком, и напечатанное
+    /// пришлось бы стирать.
+    pub stream: bool,
+    /// Показывать ли текст в индикаторе, пока человек ещё говорит, — когда
+    /// печать по ходу речи выключена.
     pub live_preview: bool,
     /// `paste` — через буфер обмена, `type` — посимвольно.
     pub insert: String,
@@ -77,6 +82,7 @@ impl Default for Config {
             microphone: String::new(),
             model: "auto".into(),
             sounds: true,
+            stream: true,
             live_preview: true,
             insert: "paste".into(),
             trailing_space: true,

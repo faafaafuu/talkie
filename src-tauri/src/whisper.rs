@@ -8,7 +8,7 @@
 //! в память занимает секунды, сама расшифровка — доли секунды. Сервер
 //! поднимается с первым нажатием клавиши и уходит после простоя.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -60,6 +60,19 @@ pub const MODELS: &[Model] = &[
 /// Порт своего сервера расшифровки. Не ходовой номер: занятый порт означал бы,
 /// что мы стучимся в чужую программу и шлём ей записи с микрофона.
 const PORT: u16 = 8643;
+
+/// Сервер расшифровки Суфлёра. Если он уже работает, у него в памяти та же
+/// модель large-v3-turbo, и поднимать рядом вторую копию — это ещё полтора
+/// гигабайта видеопамяти. Когда памяти впритык, обе копии начинают делить её
+/// с оперативной, и фраза расшифровывается не за доли секунды, а за двадцать.
+const SHARED_PORT: u16 = 8642;
+
+/// Куда сейчас идут запросы: на свой сервер или на сервер Суфлёра.
+static ACTIVE_PORT: AtomicU16 = AtomicU16::new(PORT);
+
+/// Когда общий сервер последний раз подвёл, секунд от запуска. Минуту после
+/// этого им не пользуемся: Суфлёр, скорее всего, как раз его выгрузил.
+static SHARED_FAILED_AT: AtomicU64 = AtomicU64::new(0);
 
 /// Столько видеопамяти нужно большой модели с запасом. Если свободно меньше,
 /// сервер на видеокарте не падает, а переполняет её, и загрузка тянется
@@ -418,6 +431,9 @@ pub fn warm(app: &AppHandle) {
 
 /// Готов ли сервер прямо сейчас — без ожидания и без запуска.
 pub fn ready_now() -> bool {
+    if ACTIVE_PORT.load(Ordering::Relaxed) == SHARED_PORT {
+        return port_open(SHARED_PORT);
+    }
     !STOPPING.load(Ordering::SeqCst) && server_alive()
 }
 
@@ -426,14 +442,65 @@ pub fn on_cpu() -> bool {
 }
 
 fn server_alive() -> bool {
+    port_open(PORT)
+}
+
+fn port_open(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], PORT)),
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
         std::time::Duration::from_millis(300),
     )
     .is_ok()
 }
 
-fn ensure_server(app: &AppHandle) -> Result<(), String> {
+/// Работает ли на порту Суфлёра именно сервер whisper.cpp — по его странице.
+fn shared_alive() -> bool {
+    use std::io::{Read, Write};
+
+    let failed = SHARED_FAILED_AT.load(Ordering::Relaxed);
+    if failed != 0 && now_secs().saturating_sub(failed) < 60 {
+        return false;
+    }
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], SHARED_PORT)),
+        std::time::Duration::from_millis(200),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(700)));
+    if stream.write_all(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").is_err() {
+        return false;
+    }
+    let mut page = vec![0u8; 2048];
+    let mut got = 0;
+    while got < page.len() {
+        match stream.read(&mut page[got..]) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => got += read,
+        }
+    }
+    String::from_utf8_lossy(&page[..got]).contains("Whisper.cpp Server")
+}
+
+/// Готовит сервер и отвечает, на каком порту он слушает.
+fn ensure_server(app: &AppHandle) -> Result<u16, String> {
+    let model = resolve(&crate::config_of(app).model);
+    if model.id == "turbo" && shared_alive() {
+        if SERVER.lock().unwrap_or_else(|err| err.into_inner()).is_some() {
+            shutdown();
+        }
+        if ACTIVE_PORT.swap(SHARED_PORT, Ordering::SeqCst) != SHARED_PORT {
+            log::info!("пользуюсь сервером расшифровки Суфлёра — модель та же, вторая копия не нужна");
+        }
+        ON_CPU.store(false, Ordering::Relaxed);
+        touch();
+        return Ok(SHARED_PORT);
+    }
+    ACTIVE_PORT.store(PORT, Ordering::SeqCst);
+    ensure_own(app).map(|()| PORT)
+}
+
+fn ensure_own(app: &AppHandle) -> Result<(), String> {
     let begun = std::time::Instant::now();
     let model = resolve(&crate::config_of(app).model);
 
@@ -518,7 +585,7 @@ fn ensure_server(app: &AppHandle) -> Result<(), String> {
         command.current_dir(dir);
     }
     if on_cpu {
-        let threads = std::thread::available_parallelism().map(|n| n.get().min(8)).unwrap_or(4);
+        let threads = std::thread::available_parallelism().map(|n| n.get().min(16)).unwrap_or(4);
         command.arg("--no-gpu").arg("--threads").arg(threads.to_string());
         log::info!("распознавание пойдёт на процессоре");
     }
@@ -566,12 +633,37 @@ pub async fn transcribe(
     language: &str,
     prompt: &str,
 ) -> Result<String, String> {
+    let first = request(app, wav.clone(), language, prompt).await;
+    let text = match first {
+        Ok(text) => text,
+        Err((port, err)) if port == SHARED_PORT => {
+            // Суфлёр выгрузил свой сервер между проверкой и запросом — дальше
+            // своим, у него та же модель на диске.
+            log::warn!("сервер Суфлёра не ответил ({err}) — поднимаю свой");
+            SHARED_FAILED_AT.store(now_secs().max(1), Ordering::Relaxed);
+            request(app, wav, language, prompt).await.map_err(|(_, err)| err)?
+        }
+        Err((_, err)) => return Err(err),
+    };
+    touch();
+    let text = clean(&text);
+    if echoes_prompt(&text, prompt) || is_hallucination(&text) {
+        let short: String = text.chars().take(60).collect();
+        log::info!("расшифровка похожа на выдумку модели — пропускаю: «{short}»");
+        return Ok(String::new());
+    }
+    Ok(text)
+}
+
+/// Один запрос к серверу расшифровки. Ошибка несёт порт, на котором случилась.
+async fn request(app: &AppHandle, wav: Vec<u8>, language: &str, prompt: &str) -> Result<String, (u16, String)> {
     let handle = app.clone();
     // Запуск сервера ждёт его готовности — секунды, а то и десятки. В потоке
     // для блокирующей работы, чтобы не занимать поток асинхронных задач.
-    tauri::async_runtime::spawn_blocking(move || ensure_server(&handle))
+    let port = tauri::async_runtime::spawn_blocking(move || ensure_server(&handle))
         .await
-        .map_err(|err| err.to_string())??;
+        .map_err(|err| (PORT, err.to_string()))?
+        .map_err(|err| (PORT, err))?;
     touch();
 
     let form = reqwest::multipart::Form::new()
@@ -587,7 +679,7 @@ pub async fn transcribe(
             reqwest::multipart::Part::bytes(wav)
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
-                .map_err(|err| err.to_string())?,
+                .map_err(|err| (port, err.to_string()))?,
         );
 
     let client = reqwest::Client::builder()
@@ -595,31 +687,22 @@ pub async fn transcribe(
         .no_proxy()
         .timeout(std::time::Duration::from_secs(300))
         .build()
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| (port, err.to_string()))?;
 
     let response = client
-        .post(format!("http://127.0.0.1:{PORT}/inference"))
+        .post(format!("http://127.0.0.1:{port}/inference"))
         .multipart(form)
         .send()
         .await
-        .map_err(|err| format!("сервер расшифровки не ответил: {err}"))?;
+        .map_err(|err| (port, format!("сервер расшифровки не ответил: {err}")))?;
 
     if !response.status().is_success() {
-        return Err(format!("расшифровка ответила {}", response.status()));
+        return Err((port, format!("расшифровка ответила {}", response.status())));
     }
-    let text = response
+    response
         .text()
         .await
-        .map_err(|err| format!("ответ расшифровки не прочитался: {err}"))?;
-    touch();
-
-    let text = clean(&text);
-    if echoes_prompt(&text, prompt) || is_hallucination(&text) {
-        let short: String = text.chars().take(60).collect();
-        log::info!("расшифровка похожа на выдумку модели — пропускаю: «{short}»");
-        return Ok(String::new());
-    }
-    Ok(text)
+        .map_err(|err| (port, format!("ответ расшифровки не прочитался: {err}")))
 }
 
 /// Не пересказала ли модель подсказку вместо услышанного — так она делает
@@ -678,7 +761,7 @@ fn is_hallucination(text: &str) -> bool {
 
 /// Приводит вывод сервера к тексту: он печатает строками по фразам, а на
 /// тишине выдаёт пометки вроде `[BLANK_AUDIO]`.
-fn clean(raw: &str) -> String {
+pub(crate) fn clean(raw: &str) -> String {
     raw.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())

@@ -94,7 +94,7 @@ fn mic_loop(rx: Receiver<Command>) {
             Command::Snapshot(seconds, reply) => {
                 let result = active.as_ref().map(|(_, buffer, rate)| {
                     let samples = buffer.lock().unwrap_or_else(|e| e.into_inner());
-                    let keep = (*rate as usize * seconds).min(samples.len());
+                    let keep = (*rate as usize).saturating_mul(seconds).min(samples.len());
                     (samples[samples.len() - keep..].to_vec(), *rate)
                 });
                 let _ = reply.send(result);
@@ -208,7 +208,11 @@ pub fn start(device: &str) -> bool {
         return false;
     }
     let opened = answer.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or(false);
-    opened || std::env::var_os(MIC_FILE).is_some()
+    if std::env::var_os(MIC_FILE).is_some() {
+        *STAND_IN_FROM.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        return true;
+    }
+    opened
 }
 
 /// Закончить запись и отдать её: отсчёты и частоту устройства.
@@ -225,6 +229,17 @@ pub fn stop() -> Option<(Vec<f32>, u32)> {
 /// человека у микрофона: запись «получается» всегда одна и та же.
 const MIC_FILE: &str = "GOVOR_MIC_FILE";
 
+/// Когда началась подменённая запись: черновики видят из файла столько,
+/// сколько человек «успел бы сказать», а конец записи — файл целиком.
+static STAND_IN_FROM: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+fn stand_in_so_far() -> Option<(Vec<f32>, u32)> {
+    let (samples, rate) = stand_in()?;
+    let since = (*STAND_IN_FROM.lock().unwrap_or_else(|e| e.into_inner()))?;
+    let keep = ((since.elapsed().as_secs_f64() * f64::from(rate)) as usize).min(samples.len());
+    Some((samples[..keep].to_vec(), rate))
+}
+
 fn stand_in() -> Option<(Vec<f32>, u32)> {
     let path = std::env::var_os(MIC_FILE)?;
     let bytes = std::fs::read(path).ok()?;
@@ -232,7 +247,7 @@ fn stand_in() -> Option<(Vec<f32>, u32)> {
 }
 
 /// Разбирает WAV: 16 бит, любое число каналов — сводится в моно.
-fn parse_wav(bytes: &[u8]) -> Option<(Vec<f32>, u32)> {
+pub(crate) fn parse_wav(bytes: &[u8]) -> Option<(Vec<f32>, u32)> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
@@ -269,8 +284,8 @@ fn parse_wav(bytes: &[u8]) -> Option<(Vec<f32>, u32)> {
 
 /// Копия последних секунд идущей записи — для текста «на лету».
 pub fn snapshot(seconds: usize) -> Option<(Vec<f32>, u32)> {
-    if let Some((samples, rate)) = stand_in() {
-        let keep = (rate as usize * seconds).min(samples.len());
+    if let Some((samples, rate)) = stand_in_so_far() {
+        let keep = (rate as usize).saturating_mul(seconds).min(samples.len());
         return Some((samples[samples.len() - keep..].to_vec(), rate));
     }
     let (reply, answer) = channel();
