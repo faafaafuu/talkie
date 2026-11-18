@@ -41,6 +41,28 @@ static COMMANDS: OnceLock<Sender<Command>> = OnceLock::new();
 /// Громкость последнего куска записи, 0..1 — для полосок индикатора.
 static LEVEL: AtomicU32 = AtomicU32::new(0);
 
+/// Сколько порций звука пришло с начала записи. Ноль через секунду после
+/// открытия — микрофон открылся, но звука не отдаёт.
+static RECEIVED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Когда микрофон последний раз не открылся.
+///
+/// Сразу после отказа пробовать снова незачем: устройство, которое Windows
+/// не может открыть, не оживёт от повторов, а самодельные USB-микрофоны от
+/// частых открытий и закрытий только сильнее зависают.
+static FAILED_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Сколько не открывать микрофон после отказа.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Сколько порций звука пришло с начала записи. При подмене файлом — сколько угодно.
+pub fn received() -> usize {
+    if std::env::var_os(MIC_FILE).is_some() {
+        return usize::MAX;
+    }
+    RECEIVED.load(Ordering::Relaxed)
+}
+
 pub fn level() -> f32 {
     f32::from_bits(LEVEL.load(Ordering::Relaxed))
 }
@@ -162,6 +184,7 @@ fn open_input(preferred: &str) -> Option<(cpal::Stream, Arc<Mutex<Vec<f32>>>, u3
             }
         }
         LEVEL.store(peak.min(1.0).to_bits(), Ordering::Relaxed);
+        RECEIVED.fetch_add(1, Ordering::Relaxed);
     };
 
     let on_error = |err| log::warn!("сбой записи: {err}");
@@ -203,11 +226,20 @@ fn open_input(preferred: &str) -> Option<(cpal::Stream, Arc<Mutex<Vec<f32>>>, u3
 
 /// Начать запись с названного устройства (пусто — с основного).
 pub fn start(device: &str) -> bool {
+    if std::env::var_os(MIC_FILE).is_none() {
+        let failed = *FAILED_AT.lock().unwrap_or_else(|e| e.into_inner());
+        if failed.is_some_and(|at| at.elapsed() < RETRY_AFTER) {
+            log::info!("микрофон только что не открылся — повторю не раньше чем через {} с", RETRY_AFTER.as_secs());
+            return false;
+        }
+    }
+    RECEIVED.store(0, Ordering::Relaxed);
     let (reply, answer) = channel();
     if commands().send(Command::Start(device.to_string(), reply)).is_err() {
         return false;
     }
     let opened = answer.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or(false);
+    *FAILED_AT.lock().unwrap_or_else(|e| e.into_inner()) = (!opened).then(std::time::Instant::now);
     if std::env::var_os(MIC_FILE).is_some() {
         *STAND_IN_FROM.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         return true;

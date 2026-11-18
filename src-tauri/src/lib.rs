@@ -43,6 +43,9 @@ const DOUBLE_TAP: Duration = Duration::from_millis(450);
 /// Индикатор появляется не сразу: правый Ctrl нажимают и ради Ctrl+C, и
 /// мигать при каждом таком нажатии незачем.
 const HUD_DELAY: Duration = Duration::from_millis(170);
+/// Звук от исправного микрофона приходит через десятки миллисекунд после
+/// открытия. Нет его и через секунду с лишним — микрофон завис.
+const MIC_SILENT_AFTER: Duration = Duration::from_millis(1200);
 
 pub struct AppState {
     dir: std::path::PathBuf,
@@ -299,7 +302,7 @@ fn start_recording(app: &AppHandle) -> bool {
     }
     let session = SESSION.fetch_add(1, Ordering::SeqCst) + 1;
     if !audio::start(&config.microphone) {
-        hud(app, "error", "Микрофон недоступен", Some(2400));
+        hud(app, "error", "Микрофон не открывается — переподключите его", Some(3200));
         return false;
     }
     RECORDING.store(true, Ordering::SeqCst);
@@ -329,8 +332,21 @@ fn start_recording(app: &AppHandle) -> bool {
             }
             hud(&handle, "listening", "", None);
         }
+        let opened_at = Instant::now();
+        let mut checked = false;
         while current() {
             let _ = handle.emit_to(HUD_LABEL, "hud:level", audio::level());
+            // Микрофон открылся, но звука от него нет: устройство зависло.
+            // Дальше держать запись незачем — человек говорит в пустоту.
+            if !checked && opened_at.elapsed() >= MIC_SILENT_AFTER {
+                checked = true;
+                if audio::received() == 0 {
+                    log::warn!("микрофон открылся, но за {} мс не отдал звука — запись остановлена", MIC_SILENT_AFTER.as_millis() + HUD_DELAY.as_millis());
+                    cancel_recording(&handle, false);
+                    hud(&handle, "error", "Микрофон не отдаёт звук — переподключите его", Some(3200));
+                    return;
+                }
+            }
             std::thread::sleep(Duration::from_millis(45));
         }
     });
@@ -496,8 +512,8 @@ fn finish_recording(app: &AppHandle) {
     // дождётся, если он печатает прямо сейчас.
     let streamed = take_streamed(session);
 
+    // Записи нет — её уже остановили, и индикатор показывает почему.
     let Some((samples, rate)) = audio::stop() else {
-        hud(app, "hidden", "", None);
         return;
     };
     let config = config_of(app);
@@ -829,7 +845,7 @@ async fn test_microphone_inner(app: &AppHandle, device: String) -> Result<serde_
         .await
         .map_err(|err| err.to_string())?;
     if !opened {
-        return Err("Микрофон не открылся".into());
+        return Err("Микрофон не открывается — Windows не может с ним работать. Переподключите его".into());
     }
     whisper::warm(app);
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -837,6 +853,9 @@ async fn test_microphone_inner(app: &AppHandle, device: String) -> Result<serde_
         .await
         .map_err(|err| err.to_string())?
         .ok_or("Микрофон ничего не записал")?;
+    if samples.is_empty() {
+        return Err("Микрофон открылся, но не отдаёт звук — переподключите его".into());
+    }
 
     let peak = samples.iter().fold(0.0_f32, |max, s| max.max(s.abs()));
     let Some(wav) = audio::prepare(&samples, rate) else {
