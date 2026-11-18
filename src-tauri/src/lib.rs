@@ -43,6 +43,8 @@ const DOUBLE_TAP: Duration = Duration::from_millis(450);
 /// Индикатор появляется не сразу: правый Ctrl нажимают и ради Ctrl+C, и
 /// мигать при каждом таком нажатии незачем.
 const HUD_DELAY: Duration = Duration::from_millis(170);
+/// Сколько ещё писать после отпускания клавиши.
+const RELEASE_TAIL: Duration = Duration::from_millis(800);
 /// Звук от исправного микрофона приходит через десятки миллисекунд после
 /// открытия. Нет его и через секунду с лишним — микрофон завис.
 const MIC_SILENT_AFTER: Duration = Duration::from_millis(1200);
@@ -537,6 +539,12 @@ fn finish_recording(app: &AppHandle) {
     // После смены номера записи черновик уже ничего не допечатает: замок
     // дождётся, если он печатает прямо сейчас.
     let streamed = take_streamed(session);
+
+    // Хвост: звук от микрофона идёт с задержкой — USB, звуковая служба Windows,
+    // обработка вроде NVIDIA Broadcast, — а клавишу отпускают, договаривая
+    // последнее слово. Закрывая микрофон сразу, мы почти всегда теряли
+    // последнее слово-два.
+    std::thread::sleep(RELEASE_TAIL);
 
     // Записи нет — её уже остановили, и индикатор показывает почему.
     let Some((samples, rate)) = audio::stop() else {
