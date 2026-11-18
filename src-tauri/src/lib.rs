@@ -146,6 +146,30 @@ fn make_passive(window: &WebviewWindow) {
     }
 }
 
+/// Показывает индикатор, не делая его активным окном.
+///
+/// Обычный показ окна делает его активным, если впереди окно этой же
+/// программы: чужое окно Windows отнимать не даёт, а своё — пожалуйста. Когда
+/// человек диктовал в поле главного окна Говора, индикатор забирал фокус, и
+/// текст печатался в него, то есть в никуда.
+fn show_passive(window: &WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
+    };
+
+    let Ok(raw) = window.hwnd() else {
+        let _ = window.show();
+        return;
+    };
+    let hwnd = HWND(raw.0 as _);
+    // SAFETY: окно наше и живое; показ без активации и подъём наверх.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+    }
+}
+
 /// Ставит индикатор внизу по центру того экрана, где сейчас указатель мыши.
 fn place_hud(app: &AppHandle, window: &WebviewWindow) {
     let monitors = window.available_monitors().unwrap_or_default();
@@ -188,7 +212,7 @@ fn hud(app: &AppHandle, state: &str, text: &str, hide_after: Option<u64>) {
 
     if !window.is_visible().unwrap_or(false) {
         place_hud(app, &window);
-        let _ = window.show();
+        show_passive(&window);
     }
     let _ = window.emit("hud", serde_json::json!({ "state": state, "text": text }));
 
@@ -410,7 +434,7 @@ fn stream_loop(app: AppHandle, session: u64, config: Config) {
     let hint = text::hint(&config.dictionary);
     let mut previous = String::new();
 
-    std::thread::sleep(Duration::from_millis(900));
+    std::thread::sleep(Duration::from_millis(600));
     while current() {
         // На процессоре черновик отнял бы время у окончательной расшифровки.
         if !whisper::ready_now() || whisper::on_cpu() {
@@ -429,7 +453,7 @@ fn stream_loop(app: AppHandle, session: u64, config: Config) {
         drop(samples);
 
         let began = Instant::now();
-        let heard = tauri::async_runtime::block_on(whisper::transcribe(&app, wav, &config.language, &hint));
+        let heard = tauri::async_runtime::block_on(whisper::draft(&app, wav, &config.language, &hint));
         let took = began.elapsed();
         let Ok(heard) = heard else { break };
         if !current() {
@@ -442,11 +466,11 @@ fn stream_loop(app: AppHandle, session: u64, config: Config) {
         if !stable.is_empty() {
             type_stable(session, &stable);
         }
-        if took > Duration::from_millis(2500) {
-            log::info!("черновик расшифровывается {} мс — по ходу речи больше не печатаю", took.as_millis());
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(200));
+        // Медленный черновик — сервер занят (Суфлёр тоже расшифровывает)
+        // или запись уже длинная. Печать не бросаем, а даём серверу передышку:
+        // иначе после одной заминки всё оставшееся появлялось только в конце.
+        let pause = if took > Duration::from_millis(2500) { 1000 } else { 150 };
+        std::thread::sleep(Duration::from_millis(pause));
     }
 }
 
@@ -994,11 +1018,14 @@ mod tests {
         let (samples, rate) = audio::parse_wav(&std::fs::read(path).unwrap()).unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
-        let heard = |wav: Vec<u8>| {
+        let heard = |wav: Vec<u8>, draft: bool| {
             let client = client.clone();
             let url = format!("http://127.0.0.1:{port}/inference");
             async move {
+                let beam = if draft { "1" } else { "5" };
                 let form = reqwest::multipart::Form::new()
+                    .text("beam_size", beam)
+                    .text("best_of", beam)
                     .text("response_format", "text")
                     .text("language", "ru")
                     .text("temperature", "0.0")
@@ -1017,7 +1044,7 @@ mod tests {
                 end += step;
                 continue;
             };
-            let draft = heard(wav).await;
+            let draft = heard(wav, true).await;
             let stable = text::stable_prefix(&previous, &draft);
             if let Some(rest) = stable.strip_prefix(window.as_str()) {
                 window.push_str(rest);
@@ -1027,7 +1054,7 @@ mod tests {
             end += step;
         }
 
-        let mut final_text = heard(audio::prepare(&samples, rate).unwrap()).await;
+        let mut final_text = heard(audio::prepare(&samples, rate).unwrap(), false).await;
         final_text.push(' ');
         let same = text::common_prefix(&window, &final_text);
         let erase = window.chars().count() - same;

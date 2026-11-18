@@ -633,7 +633,19 @@ pub async fn transcribe(
     language: &str,
     prompt: &str,
 ) -> Result<String, String> {
-    let first = request(app, wav.clone(), language, prompt).await;
+    run(app, wav, language, prompt, false).await
+}
+
+/// Черновая расшифровка растущей записи — без лучевого поиска.
+///
+/// Черновик нужен быстро, а его ошибки всё равно исправит окончательная
+/// расшифровка; без луча он готов примерно на пятую часть быстрее.
+pub async fn draft(app: &AppHandle, wav: Vec<u8>, language: &str, prompt: &str) -> Result<String, String> {
+    run(app, wav, language, prompt, true).await
+}
+
+async fn run(app: &AppHandle, wav: Vec<u8>, language: &str, prompt: &str, draft: bool) -> Result<String, String> {
+    let first = request(app, wav.clone(), language, prompt, draft).await;
     let text = match first {
         Ok(text) => text,
         Err((port, err)) if port == SHARED_PORT => {
@@ -641,7 +653,7 @@ pub async fn transcribe(
             // своим, у него та же модель на диске.
             log::warn!("сервер Суфлёра не ответил ({err}) — поднимаю свой");
             SHARED_FAILED_AT.store(now_secs().max(1), Ordering::Relaxed);
-            request(app, wav, language, prompt).await.map_err(|(_, err)| err)?
+            request(app, wav, language, prompt, draft).await.map_err(|(_, err)| err)?
         }
         Err((_, err)) => return Err(err),
     };
@@ -656,7 +668,13 @@ pub async fn transcribe(
 }
 
 /// Один запрос к серверу расшифровки. Ошибка несёт порт, на котором случилась.
-async fn request(app: &AppHandle, wav: Vec<u8>, language: &str, prompt: &str) -> Result<String, (u16, String)> {
+async fn request(
+    app: &AppHandle,
+    wav: Vec<u8>,
+    language: &str,
+    prompt: &str,
+    draft: bool,
+) -> Result<String, (u16, String)> {
     let handle = app.clone();
     // Запуск сервера ждёт его готовности — секунды, а то и десятки. В потоке
     // для блокирующей работы, чтобы не занимать поток асинхронных задач.
@@ -666,7 +684,11 @@ async fn request(app: &AppHandle, wav: Vec<u8>, language: &str, prompt: &str) ->
         .map_err(|err| (PORT, err))?;
     touch();
 
-    let form = reqwest::multipart::Form::new()
+    let mut form = reqwest::multipart::Form::new();
+    if draft {
+        form = form.text("beam_size", "1").text("best_of", "1");
+    }
+    let form = form
         .text("response_format", "text")
         .text("language", language.to_string())
         .text("prompt", prompt.to_string())
