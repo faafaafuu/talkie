@@ -265,13 +265,15 @@ fn controller(app: AppHandle, events: Receiver<hotkey::Event>) {
                     hud(&app, "locked", "", None);
                     Phase::Locked
                 } else {
+                    log::info!("клавишу отпустили через {} мс — это касание, а не диктовка", since.elapsed().as_millis());
                     last_tap = Some(Instant::now());
                     cancel_recording(&app, false);
                     Phase::Idle
                 }
             }
             (Event::Up, Phase::Released) => Phase::Idle,
-            (Event::Chord, Phase::Holding(_)) => {
+            (Event::Chord, Phase::Holding(since)) => {
+                log::info!("поверх клавиши диктовки нажали другую через {} мс — это сочетание, запись отменена", since.elapsed().as_millis());
                 cancel_recording(&app, false);
                 Phase::Released
             }

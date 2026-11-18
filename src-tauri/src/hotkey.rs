@@ -262,6 +262,22 @@ static NEED_MASK: AtomicBool = AtomicBool::new(false);
 /// Нажатие обычной клавиши сочетания забрали — заберём и отпускание.
 static EATEN: AtomicBool = AtomicBool::new(false);
 
+/// Клавиша диктовки — одиночный Alt или Win, и система её не видит вовсе.
+///
+/// Alt, отпущенный без другой клавиши, открывает меню окна, Win — «Пуск».
+/// Пустая клавиша между нажатием и отпусканием (`mask_modifiers`) это гасит
+/// только там, где меню ведёт сама Windows. Программы на Electron и Chromium
+/// следят за Alt сами: в них каждое второе отпускание открывало меню, фокус
+/// уходил из поля ввода, и продиктованное пропадало — «через раз» или
+/// целиком, кроме первого слова. Поэтому одиночный Alt или Win забирается
+/// у системы целиком, а если поверх нажали другую клавишу (Alt+Tab,
+/// Alt+Shift), система получает и модификатор, и эту клавишу — сочетание
+/// работает как обычно, а запись отменяется.
+static HIDDEN: AtomicBool = AtomicBool::new(false);
+/// Системе уже отдали нажатие спрятанного модификатора (было сочетание) —
+/// значит, отдать ей и отпускание.
+static REPLAYED: AtomicBool = AtomicBool::new(false);
+
 /// Клавиша диктовки сейчас нажата целиком.
 static HELD: AtomicBool = AtomicBool::new(false);
 /// Идёт запись — Esc её отменяет.
@@ -334,6 +350,9 @@ pub fn configure(id: &str) {
     let all = slots.iter().flatten().copied().filter(|vk| *vk != 0);
     MODS_ONLY.store(all.clone().all(is_modifier), Ordering::Relaxed);
     NEED_MASK.store(all.clone().any(opens_menu), Ordering::Relaxed);
+    let lone = slots[1] == NONE && slots[2] == NONE && slots[0][1] == 0;
+    HIDDEN.store(lone && opens_menu(slots[0][0]), Ordering::Relaxed);
+    REPLAYED.store(false, Ordering::Relaxed);
     for flag in &DOWN {
         flag.store(false, Ordering::Relaxed);
     }
@@ -535,6 +554,20 @@ unsafe extern "system" fn keyboard_proc(
     }
 
     let Some(index) = slot_index(vk) else {
+        // Поверх спрятанного Alt или Win нажали другую клавишу — любую, и
+        // модификатор тоже: Alt+Shift меняет раскладку. Это сочетание: запись
+        // отменяется, а система получает спрятанное нажатие и эту клавишу
+        // одним вызовом, в правильном порядке.
+        if down
+            && vk != 0xE8
+            && HELD.load(Ordering::Relaxed)
+            && HIDDEN.load(Ordering::Relaxed)
+            && !REPLAYED.swap(true, Ordering::Relaxed)
+        {
+            send(Event::Chord);
+            replay(KEYS[0][0].load(Ordering::Relaxed), &info);
+            return LRESULT(1);
+        }
         // Другая клавиша поверх удерживаемой — это сочетание, а не диктовка.
         // Одиночные модификаторы в счёт не идут: Shift и Alt нажимают, меняя
         // раскладку, и обрывать из-за этого запись незачем.
@@ -557,11 +590,15 @@ unsafe extern "system" fn keyboard_proc(
         // Windows шлёт нажатие снова и снова, пока клавишу держат.
         let repeat = DOWN[index].swap(true, Ordering::Relaxed);
         let rest = slots_down(index);
+        let hidden = HIDDEN.load(Ordering::Relaxed);
         if !repeat && rest && !HELD.swap(true, Ordering::Relaxed) {
-            if NEED_MASK.load(Ordering::Relaxed) {
+            if NEED_MASK.load(Ordering::Relaxed) && !hidden {
                 mask_modifiers();
             }
             send(Event::Down);
+        }
+        if hidden && !REPLAYED.load(Ordering::Relaxed) {
+            return LRESULT(1);
         }
         // Забранная клавиша остаётся нашей до отпускания, даже если
         // модификаторы отпустили раньше: иначе её повторы напечатались бы.
@@ -575,6 +612,9 @@ unsafe extern "system" fn keyboard_proc(
             send(Event::Up);
         }
         if plain && EATEN.swap(false, Ordering::Relaxed) {
+            return LRESULT(1);
+        }
+        if HIDDEN.load(Ordering::Relaxed) && !REPLAYED.swap(false, Ordering::Relaxed) {
             return LRESULT(1);
         }
     }
@@ -607,6 +647,38 @@ unsafe extern "system" fn mouse_proc(
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Отдаёт системе спрятанное нажатие модификатора и следом — клавишу, из-за
+/// которой это оказалось сочетанием.
+fn replay(modifier: u32, key: &windows::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_EXTENDEDKEY, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
+    };
+    let event = |vk: u32, scan: u32, extended: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk as u16),
+                wScan: scan as u16,
+                dwFlags: if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) },
+                time: 0,
+                dwExtraInfo: OWN_INPUT,
+            },
+        },
+    };
+    // SAFETY: только переводит код клавиши в скан-код.
+    let scan = unsafe { MapVirtualKeyW(modifier, MAPVK_VK_TO_VSC) };
+    let inputs = [
+        event(modifier, scan, matches!(modifier, 0xA5 | 0x5B | 0x5C)),
+        event(key.vkCode, key.scanCode, key.flags.0 & 0x01 != 0),
+    ];
+    // SAFETY: посылает два нажатия; из хука это допустимо — они встанут в
+    // очередь после текущего события, которое мы забираем.
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 /// Прячет от Windows, что модификатор нажали «вхолостую» — тем же приёмом
@@ -684,6 +756,21 @@ mod tests {
     fn function_keys_work_alone() {
         assert_eq!(title(&compose(&[0x7B]).unwrap()), "F12");
         assert_eq!(title(&compose(&[0xA4, 0x79]).unwrap()), "Alt + F10");
+    }
+
+    #[test]
+    fn a_lone_alt_or_win_is_hidden_from_the_system() {
+        configure("keys:164");
+        assert!(HIDDEN.load(Ordering::Relaxed), "левый Alt");
+        configure("ralt");
+        assert!(HIDDEN.load(Ordering::Relaxed), "правый Alt");
+        configure("rctrl");
+        assert!(!HIDDEN.load(Ordering::Relaxed), "Ctrl меню не открывает — прятать незачем");
+        configure("ctrl+win");
+        assert!(!HIDDEN.load(Ordering::Relaxed), "сочетание из двух клавиш");
+        configure("keys:164|165+121");
+        assert!(!HIDDEN.load(Ordering::Relaxed), "Alt + F10");
+        configure("rctrl");
     }
 
     #[test]
