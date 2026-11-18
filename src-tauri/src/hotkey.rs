@@ -416,7 +416,7 @@ pub fn install() -> Receiver<Event> {
     let _ = EVENTS.set(tx);
 
     std::thread::Builder::new()
-        .name("govor-hotkey".into())
+        .name("talkie-hotkey".into())
         .spawn(hook_loop)
         .ok();
 

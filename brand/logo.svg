@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Talkie: облачко речи из двух половин — тёплой с хвостиком и синей,
+       заходящей внутрь; три точки — «говорю». Плоские цвета без градиентов. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="#F4EFE1"/>
+  <path d="M 323 712 C 340 790 398 852 492 874 C 452 822 424 712 376 588 Z" fill="#EE4325"/>
+  <path d="M 512 236 C 360 236 238 336 238 458 C 238 548 288 616 352 652" fill="none" stroke="#EE4325" stroke-width="136" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 512 236 C 664 236 786 336 786 458 C 786 580 670 676 528 676 L 446 676" fill="none" stroke="#0B40D4" stroke-width="136" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="404" cy="458" r="40" fill="#DDE13A"/>
+  <circle cx="512" cy="458" r="40" fill="#F8B4CF"/>
+  <circle cx="620" cy="458" r="40" fill="#6BC2EC"/>
+</svg>

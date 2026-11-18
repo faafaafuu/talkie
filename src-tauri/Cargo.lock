@@ -1320,25 +1320,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "govor"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "cpal",
- "log",
- "reqwest",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-log",
- "tokio",
- "windows 0.62.2",
- "zip",
-]
-
-[[package]]
 name = "gtk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3440,6 +3421,25 @@ dependencies = [
  "pkg-config",
  "toml 0.8.2",
  "version-compare",
+]
+
+[[package]]
+name = "talkie"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "cpal",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-log",
+ "tokio",
+ "windows 0.62.2",
+ "zip",
 ]
 
 [[package]]

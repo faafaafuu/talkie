@@ -1,4 +1,4 @@
-# Говор
+# Talkie
 
 Диктовка голосом в любое окно Windows. Удерживайте клавишу и говорите; отпустите —
 текст появится там, где стоит курсор: в письме, чате, документе, редакторе кода.
@@ -51,7 +51,7 @@ Alt или Win не принимается: она нужна для набор�
   сэкономлено. Хранится только локально, отключается в настройках.
 - **Память не занята зря** — модель выгружается после простоя и загружается
   снова с первым нажатием клавиши. Если рядом работает
-  [Суфлёр](https://github.com/faafaafuu/asis) с той же моделью, Говор
+  [Суфлёр](https://github.com/faafaafuu/asis) с той же моделью, Talkie
   пользуется его сервером расшифровки, а не держит вторую копию в видеопамяти.
 
 ## Модели
@@ -98,11 +98,11 @@ cargo test --manifest-path src-tauri/Cargo.toml -- --ignored download
 Печать по ходу речи — без клавиатуры и окон, на работающем сервере whisper.cpp:
 
 ```bash
-GOVOR_TEST_WAV=phrase.wav GOVOR_TEST_PORT=8642 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored streaming --nocapture
+TALKIE_TEST_WAV=phrase.wav TALKIE_TEST_PORT=8642 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored streaming --nocapture
 ```
 
 Весь путь от клавиши до вставленного текста можно пройти без микрофона: переменная
-окружения `GOVOR_MIC_FILE` с путём к WAV (16 бит) подменяет запись этим файлом,
+окружения `TALKIE_MIC_FILE` с путём к WAV (16 бит) подменяет запись этим файлом,
 а черновики видят из него столько, сколько прошло времени от начала записи.
 
 ## Ограничения
@@ -131,4 +131,6 @@ GOVOR_TEST_WAV=phrase.wav GOVOR_TEST_PORT=8642 cargo test --manifest-path src-ta
 | `src/` | Главное окно и индикатор записи — HTML, CSS, JS без сборщика |
 
 Данные лежат в `%APPDATA%\app.govor.dictation`, журнал — в
-`%LOCALAPPDATA%\app.govor.dictation\logs\govor.log`.
+`%LOCALAPPDATA%\app.govor.dictation\logs\talkie.log`. Идентификатор остался от
+первого названия программы — «Говор»: по нему Windows хранит настройки, и смена
+названия их не трогает.

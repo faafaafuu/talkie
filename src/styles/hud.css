@@ -46,7 +46,7 @@ html, body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #ff7a59, #8a4fe0);
+  background: linear-gradient(135deg, #ee4325, #6bc2ec);
   flex: none;
 }
 
@@ -75,7 +75,7 @@ html, body {
   width: 3px;
   height: 3px;
   border-radius: 2px;
-  background: linear-gradient(180deg, #ff8a6b, #a56bf0);
+  background: linear-gradient(180deg, #ee4325, #6bc2ec);
   transition: height 70ms linear;
 }
 

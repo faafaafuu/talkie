@@ -1,4 +1,4 @@
-//! Говор — диктовка голосом в любое окно.
+//! Talkie — диктовка голосом в любое окно.
 //!
 //! Удерживают клавишу и говорят; отпустили — текст появляется там, где стоит
 //! курсор. Два быстрых нажатия — запись без рук до следующего нажатия.
@@ -97,7 +97,7 @@ pub fn recording() -> bool {
 
 fn build_hud(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, HUD_LABEL, WebviewUrl::App("hud.html".into()))
-        .title("Говор — индикатор")
+        .title("Talkie — индикатор")
         .inner_size(HUD_WIDTH, HUD_HEIGHT)
         .decorations(false)
         .transparent(true)
@@ -150,7 +150,7 @@ fn make_passive(window: &WebviewWindow) {
 ///
 /// Обычный показ окна делает его активным, если впереди окно этой же
 /// программы: чужое окно Windows отнимать не даёт, а своё — пожалуйста. Когда
-/// человек диктовал в поле главного окна Говора, индикатор забирал фокус, и
+/// человек диктовал в поле главного окна Talkie, индикатор забирал фокус, и
 /// текст печатался в него, то есть в никуда.
 fn show_passive(window: &WebviewWindow) {
     use windows::Win32::Foundation::HWND;
@@ -389,7 +389,7 @@ fn start_recording(app: &AppHandle) -> bool {
         let handle = app.clone();
         let config = config.clone();
         std::thread::Builder::new()
-            .name("govor-stream".into())
+            .name("talkie-stream".into())
             .spawn(move || stream_loop(handle, session, config))
             .ok();
         return true;
@@ -691,7 +691,7 @@ pub fn show_main(app: &AppHandle) {
         return;
     }
     let built = WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App("index.html".into()))
-        .title("Говор")
+        .title("Talkie")
         .inner_size(940.0, 660.0)
         .min_inner_size(780.0, 540.0)
         .center()
@@ -705,15 +705,15 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let open = MenuItem::with_id(app, "open", "Открыть Говор", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Открыть Talkie", true, None::<&str>)?;
     let pause = CheckMenuItem::with_id(app, "pause", "Пауза — не слушать клавишу", true, false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&open, &pause, &separator, &quit])?;
     let pause_item = pause.clone();
 
-    let mut tray = TrayIconBuilder::with_id("govor-tray")
-        .tooltip("Говор — диктовка")
+    let mut tray = TrayIconBuilder::with_id("talkie-tray")
+        .tooltip("Talkie — диктовка")
         .menu(&menu)
         .show_menu_on_left_click(false);
     // Без явной иконки значок в трее пустой, то есть его не видно.
@@ -923,7 +923,7 @@ pub fn run() {
             tauri_plugin_log::Builder::new()
                 .clear_targets()
                 .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
-                    file_name: Some("govor".into()),
+                    file_name: Some("talkie".into()),
                 }))
                 .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout))
                 .level(log::LevelFilter::Info)
@@ -961,15 +961,27 @@ pub fn run() {
             let handle = app.handle().clone();
             let dir = handle.path().app_data_dir()?;
             let config = config::load(&dir);
-            log::info!("Говор {} запущен, клавиша «{}»", env!("CARGO_PKG_VERSION"), hotkey::title(&config.hotkey));
+            log::info!("Talkie {} запущен, клавиша «{}»", env!("CARGO_PKG_VERSION"), hotkey::title(&config.hotkey));
 
             hotkey::configure(&config.hotkey);
             let first_run = !config.onboarded;
+            let autostart = config.autostart;
             app.manage(AppState {
                 history: Mutex::new(History::load(&dir)),
                 config: Mutex::new(config),
                 dir,
             });
+
+            // Запись в автозапуске хранит путь к программе. Он меняется при
+            // переезде в другую папку и сменился с переименованием в Talkie:
+            // прописываемся заново при каждом запуске, иначе Windows запускала
+            // бы старый файл или ничего.
+            if autostart {
+                use tauri_plugin_autostart::ManagerExt;
+                if let Err(err) = handle.autolaunch().enable() {
+                    log::warn!("автозапуск не обновился: {err}");
+                }
+            }
 
             build_hud(&handle)?;
             setup_tray(&handle)?;
@@ -982,7 +994,7 @@ pub fn run() {
             let events = hotkey::install();
             let controller_handle = handle.clone();
             std::thread::Builder::new()
-                .name("govor-controller".into())
+                .name("talkie-controller".into())
                 .spawn(move || controller(controller_handle, events))?;
 
             if !background || first_run {
@@ -1009,12 +1021,12 @@ mod tests {
     /// «окне» обязан совпасть с тем, что вставила бы обычная диктовка.
     ///
     /// Нужен работающий сервер whisper.cpp и запись речи:
-    /// `GOVOR_TEST_WAV=фраза.wav GOVOR_TEST_PORT=8642 cargo test -- --ignored streaming`.
+    /// `TALKIE_TEST_WAV=фраза.wav TALKIE_TEST_PORT=8642 cargo test -- --ignored streaming`.
     #[tokio::test]
     #[ignore]
     async fn streaming_ends_with_the_final_text() {
-        let path = std::env::var("GOVOR_TEST_WAV").expect("GOVOR_TEST_WAV — путь к записи речи");
-        let port = std::env::var("GOVOR_TEST_PORT").unwrap_or_else(|_| "8642".into());
+        let path = std::env::var("TALKIE_TEST_WAV").expect("TALKIE_TEST_WAV — путь к записи речи");
+        let port = std::env::var("TALKIE_TEST_PORT").unwrap_or_else(|_| "8642".into());
         let (samples, rate) = audio::parse_wav(&std::fs::read(path).unwrap()).unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 

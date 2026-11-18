@@ -219,7 +219,7 @@ async fn download(
     const ATTEMPTS: u32 = 40;
 
     let client = reqwest::Client::builder()
-        .user_agent("Govor")
+        .user_agent("Talkie")
         .connect_timeout(std::time::Duration::from_secs(20))
         // Не общий срок на файл, а срок молчания: большой файл качается долго,
         // но замершее соединение надо бросить и начать новое.
@@ -379,7 +379,7 @@ pub fn shutdown() {
     STOPPING.store(true, Ordering::SeqCst);
 
     let started = std::thread::Builder::new()
-        .name("govor-whisper-stop".into())
+        .name("talkie-whisper-stop".into())
         .spawn(move || {
             let _ = child.kill();
             let _ = child.wait();
@@ -394,7 +394,7 @@ pub fn shutdown() {
 /// Следит за простоем: модель, которой не пользуются, память не занимает.
 pub fn watch_idle(app: AppHandle) {
     std::thread::Builder::new()
-        .name("govor-whisper-idle".into())
+        .name("talkie-whisper-idle".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(20));
             let minutes = crate::config_of(&app).unload_minutes;
@@ -419,7 +419,7 @@ pub fn warm(app: &AppHandle) {
     }
     let app = app.clone();
     std::thread::Builder::new()
-        .name("govor-whisper-warm".into())
+        .name("talkie-whisper-warm".into())
         .spawn(move || {
             if let Err(err) = ensure_server(&app) {
                 log::warn!("сервер расшифровки не поднялся заранее: {err}");
@@ -836,8 +836,8 @@ mod tests {
 
     #[test]
     fn the_hint_does_not_come_back_as_speech() {
-        let hint = "Kubernetes, Говор, Tauri, whisper.cpp, PostgreSQL";
-        assert!(echoes_prompt("Kubernetes Говор Tauri whisper.cpp", hint));
+        let hint = "Kubernetes, Talkie, Tauri, whisper.cpp, PostgreSQL";
+        assert!(echoes_prompt("Kubernetes Talkie Tauri whisper.cpp", hint));
         assert!(!echoes_prompt("Поставь Kubernetes на сервер", hint));
     }
 
@@ -850,7 +850,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn download_resumes_where_it_stopped() {
-        let dir = std::env::temp_dir().join(format!("govor-download-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("talkie-download-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let url = format!("{RELEASE}/{CPU_ZIP}");

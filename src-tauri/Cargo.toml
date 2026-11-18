@@ -1,13 +1,13 @@
 [package]
-name = "govor"
-version = "0.1.0"
-description = "Говор — диктовка голосом в любое окно. Распознавание идёт на вашем компьютере, бесплатно и без подписки."
-authors = ["Govor"]
+name = "talkie"
+version = "0.2.0"
+description = "Talkie — диктовка голосом в любое окно. Распознавание идёт на вашем компьютере, бесплатно и без подписки."
+authors = ["Talkie"]
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "govor_lib"
+name = "talkie_lib"
 crate-type = ["rlib"]
 
 [build-dependencies]
